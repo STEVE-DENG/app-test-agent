@@ -131,7 +131,8 @@ pub async fn capture_observation(
         (package, String::new())
     });
 
-    let page_signature = page_signature(&package, &activity, &screenshot, &nodes);
+    let page_signature = page_signature(&package, &activity, &nodes);
+    let page_id = page_signature[..16].to_string();
     let screenshot_data_url = format!(
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(&screenshot)
@@ -145,6 +146,7 @@ pub async fn capture_observation(
         nodes,
         package,
         activity,
+        page_id,
         page_signature,
         captured_at: Utc::now().to_rfc3339(),
         width,
@@ -321,6 +323,55 @@ pub async fn start_app(serial: &str, package: &str) -> Result<String, String> {
     Ok(format!("已请求启动 {package}"))
 }
 
+pub async fn restart_app_cleanly(serial: &str, package: &str) -> Result<String, String> {
+    adb_text(vec![
+        "-s".into(),
+        serial.into(),
+        "shell".into(),
+        "am".into(),
+        "force-stop".into(),
+        package.to_string(),
+    ])
+    .await?;
+    let resolved = adb_text(vec![
+        "-s".into(),
+        serial.into(),
+        "shell".into(),
+        "cmd".into(),
+        "package".into(),
+        "resolve-activity".into(),
+        "--brief".into(),
+        "-a".into(),
+        "android.intent.action.MAIN".into(),
+        "-c".into(),
+        "android.intent.category.LAUNCHER".into(),
+        package.to_string(),
+    ])
+    .await?;
+    let component = resolved
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains('/'))
+        .last()
+        .ok_or_else(|| format!("无法解析 {package} 的启动 Activity"))?;
+    adb_text(vec![
+        "-s".into(),
+        serial.into(),
+        "shell".into(),
+        "am".into(),
+        "start".into(),
+        "-n".into(),
+        component.to_string(),
+        "-a".into(),
+        "android.intent.action.MAIN".into(),
+        "-c".into(),
+        "android.intent.category.LAUNCHER".into(),
+    ])
+    .await?;
+    sleep(Duration::from_millis(2_400)).await;
+    Ok(format!("已冷启动 {package}"))
+}
+
 pub async fn list_packages(serial: &str) -> Result<Vec<String>, String> {
     let output = adb_text(vec![
         "-s".into(),
@@ -420,6 +471,7 @@ pub fn parse_ui_nodes(xml: &str) -> Result<Vec<UiNode>, String> {
             enabled: node.attribute("enabled") != Some("false"),
             focusable: node.attribute("focusable") == Some("true"),
             scrollable: node.attribute("scrollable") == Some("true"),
+            selected: node.attribute("selected") == Some("true"),
             visible: node.attribute("visible-to-user") != Some("false"),
             depth,
         });
@@ -505,19 +557,97 @@ fn inferred_dimensions(nodes: &[UiNode]) -> Option<(i32, i32)> {
     (dimensions.0 > 0 && dimensions.1 > 0).then_some(dimensions)
 }
 
-fn page_signature(package: &str, activity: &str, screenshot: &[u8], nodes: &[UiNode]) -> String {
+fn page_signature(package: &str, activity: &str, nodes: &[UiNode]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(package.as_bytes());
     hasher.update(activity.as_bytes());
-    hasher.update(screenshot);
-    for node in nodes.iter().filter(|node| node.is_actionable()).take(120) {
-        hasher.update(node.text.as_bytes());
-        hasher.update(node.content_description.as_bytes());
-        hasher.update(node.resource_id.as_bytes());
-        hasher.update(node.bounds.left.to_le_bytes());
-        hasher.update(node.bounds.top.to_le_bytes());
+    let height = nodes
+        .iter()
+        .filter(|node| node.visible)
+        .map(|node| node.bounds.bottom)
+        .max()
+        .unwrap_or(0);
+    let mut selected = nodes
+        .iter()
+        .filter(|node| node.visible && node.selected)
+        .filter_map(node_semantic)
+        .collect::<Vec<_>>();
+    selected.sort();
+    selected.dedup();
+    for semantic in &selected {
+        hasher.update(b"selected:");
+        hasher.update(semantic.as_bytes());
+    }
+
+    let mut bottom_navigation = nodes
+        .iter()
+        .filter(|node| node.visible && node.clickable && node.bounds.top > height * 88 / 100)
+        .filter(|node| {
+            node.content_description.contains("选中状态")
+                || node.content_description.contains("未选中状态")
+                || node.resource_id.ends_with("tab_title")
+        })
+        .filter_map(node_semantic)
+        .collect::<Vec<_>>();
+    bottom_navigation.sort();
+    bottom_navigation.dedup();
+    for semantic in &bottom_navigation {
+        hasher.update(b"nav:");
+        hasher.update(semantic.as_bytes());
+    }
+
+    if selected.is_empty() && bottom_navigation.is_empty() {
+        let mut structural = nodes
+            .iter()
+            .filter(|node| {
+                node.visible
+                    && node.is_actionable()
+                    && (!node.resource_id.is_empty() || node.scrollable)
+            })
+            .map(|node| format!("{}|{}|{}", node.class_name, node.resource_id, node.selected))
+            .collect::<Vec<_>>();
+        structural.sort();
+        structural.dedup();
+        for semantic in structural.iter().take(48) {
+            hasher.update(b"structure:");
+            hasher.update(semantic.as_bytes());
+        }
     }
     format!("{:x}", hasher.finalize())
+}
+
+fn node_semantic(node: &UiNode) -> Option<String> {
+    let value = if !node.text.trim().is_empty() {
+        node.text.trim()
+    } else if !node.content_description.trim().is_empty() {
+        node.content_description.trim()
+    } else if !node.resource_id.trim().is_empty() {
+        node.resource_id.trim()
+    } else {
+        return None;
+    };
+    meaningful_text(value).map(|value| {
+        let normalized = if value.contains("未读消息数") {
+            let name = value.split('，').next().unwrap_or(value);
+            let state = value.rsplit('，').next().unwrap_or("");
+            format!("{name}，{state}")
+        } else {
+            value.to_string()
+        };
+        normalized.chars().take(120).collect()
+    })
+}
+
+fn meaningful_text(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(":id/") {
+        return None;
+    }
+    value.lines().map(str::trim).find(|line| {
+        !line.is_empty()
+            && !(line.starts_with("第") && line.contains("标签"))
+            && !line.contains(":id/")
+    })
 }
 
 fn png_dimensions(bytes: &[u8]) -> Option<(i32, i32)> {
@@ -738,6 +868,7 @@ mod tests {
                 enabled: true,
                 focusable: true,
                 scrollable: false,
+                selected: false,
                 visible: true,
                 depth: 2,
             },
@@ -758,6 +889,7 @@ mod tests {
                 enabled: true,
                 focusable: true,
                 scrollable: false,
+                selected: false,
                 visible: true,
                 depth: 2,
             },

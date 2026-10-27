@@ -56,6 +56,7 @@ pub struct UiNode {
     pub enabled: bool,
     pub focusable: bool,
     pub scrollable: bool,
+    pub selected: bool,
     pub visible: bool,
     pub depth: usize,
 }
@@ -76,10 +77,265 @@ pub struct Observation {
     pub nodes: Vec<UiNode>,
     pub package: String,
     pub activity: String,
+    pub page_id: String,
     pub page_signature: String,
     pub captured_at: String,
     pub width: i32,
     pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeElement {
+    pub key: String,
+    pub index: usize,
+    pub text: String,
+    pub content_description: String,
+    pub resource_id: String,
+    pub class_name: String,
+    pub bounds: Bounds,
+    pub clickable: bool,
+    pub scrollable: bool,
+    pub focusable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgePage {
+    pub id: String,
+    pub name: String,
+    pub signature: String,
+    pub package: String,
+    pub activity: String,
+    pub screenshot_path: String,
+    pub ui_path: String,
+    pub width: i32,
+    pub height: i32,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub visit_count: u32,
+    pub elements: Vec<KnowledgeElement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageTransition {
+    pub id: String,
+    pub from_page_id: String,
+    pub to_page_id: String,
+    pub trigger_key: String,
+    pub trigger_label: String,
+    pub tool: String,
+    pub args: Value,
+    pub result_summary: String,
+    pub success: bool,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionTrace {
+    pub id: String,
+    pub run_id: String,
+    pub step_index: u32,
+    pub from_page_id: String,
+    pub to_page_id: String,
+    pub tool: String,
+    pub args: Value,
+    pub result: Value,
+    pub success: bool,
+    pub screenshot_before: String,
+    pub screenshot_after: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCaseStep {
+    pub from_page_id: String,
+    pub expected_page_id: String,
+    pub element_key: String,
+    pub label: String,
+    pub action: String,
+    pub args: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppTestCase {
+    pub id: String,
+    pub name: String,
+    pub package: String,
+    pub start_page_id: String,
+    pub target_page_id: String,
+    pub steps: Vec<TestCaseStep>,
+    pub status: String,
+    pub last_result: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppKnowledgePlugin {
+    pub schema_version: u32,
+    pub package: String,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub pages: Vec<KnowledgePage>,
+    pub transitions: Vec<PageTransition>,
+    pub actions: Vec<ActionTrace>,
+    pub test_cases: Vec<AppTestCase>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPluginSummary {
+    pub package: String,
+    pub name: String,
+    pub pages: usize,
+    pub transitions: usize,
+    pub actions: usize,
+    pub test_cases: usize,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactInfo {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub size: u64,
+    pub modified_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EfficiencyStats {
+    pub total_runs: u32,
+    pub completed_runs: u32,
+    pub failed_runs: u32,
+    pub total_steps: u32,
+    pub avg_steps: f64,
+    pub total_model_ms: u64,
+    pub total_tool_ms: u64,
+    pub total_observation_ms: u64,
+    pub total_knowledge_ms: u64,
+    pub total_step_ms: u64,
+    pub avg_step_ms: f64,
+    pub pending_skills: u32,
+    pub approved_skills: u32,
+    pub pages: usize,
+    pub transitions: usize,
+    pub test_cases: usize,
+    pub artifacts: usize,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugSnapshot {
+    pub device_serial: String,
+    pub package: String,
+    pub activity: String,
+    pub page_id: String,
+    pub page_signature: String,
+    pub captured_at: String,
+    pub screenshot_path: String,
+    pub ui_path: String,
+    pub screenshot_data_url: String,
+    pub raw_ui_xml: String,
+    pub nodes: Vec<UiNode>,
+    pub node_count: usize,
+    pub visible_node_count: usize,
+    pub actionable_node_count: usize,
+    pub scrollable_node_count: usize,
+    pub artifacts_dir: String,
+    pub data_dir: String,
+    pub artifacts: Vec<ArtifactInfo>,
+    pub efficiency: EfficiencyStats,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugSnapshotInput {
+    pub device_serial: String,
+    #[serde(default)]
+    pub package: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningRoundReport {
+    pub cycle: u32,
+    pub steps: u32,
+    pub pages_before: usize,
+    pub pages_after: usize,
+    pub transitions_before: usize,
+    pub transitions_after: usize,
+    pub new_pages: usize,
+    pub new_transitions: usize,
+    pub elapsed_ms: u64,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningLoopReport {
+    pub package: String,
+    pub status: String,
+    pub cycles_completed: u32,
+    pub total_steps: u32,
+    pub pages: usize,
+    pub transitions: usize,
+    pub test_cases: usize,
+    pub rounds: Vec<LearningRoundReport>,
+    pub started_at: String,
+    pub finished_at: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningLoopInput {
+    pub device_serial: String,
+    pub package: String,
+    pub max_cycles: u32,
+    pub max_steps_per_cycle: u32,
+    pub stop_after_stagnant_cycles: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplorationReport {
+    pub package: String,
+    pub status: String,
+    pub steps: u32,
+    pub pages_discovered: usize,
+    pub transitions_discovered: usize,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartExplorationInput {
+    pub device_serial: String,
+    pub package: String,
+    pub max_steps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCaseRunResult {
+    pub test_id: String,
+    pub package: String,
+    pub status: String,
+    pub passed_steps: u32,
+    pub total_steps: u32,
+    pub message: String,
+    pub finished_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

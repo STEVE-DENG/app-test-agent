@@ -1,14 +1,24 @@
 import {
   Check,
   Clock3,
+  BugPlay,
   History,
   LibraryBig,
+  Network,
   ScanSearch,
   Sparkles,
   X,
 } from "lucide-react";
+import { DebugPanel } from "./DebugPanel";
+import { KnowledgePanel } from "./KnowledgePanel";
 import type {
   AgentEvent,
+  AppKnowledgePlugin,
+  AppPluginSummary,
+  DebugSnapshot,
+  DeviceInfo,
+  EfficiencyStats,
+  LearningLoopReport,
   Observation,
   RunRecord,
   SkillRecord,
@@ -16,28 +26,67 @@ import type {
   UiNode,
 } from "../types";
 
-export type DockTab = "timeline" | "skills" | "runs" | "inspector";
+export type DockTab =
+  | "timeline"
+  | "knowledge"
+  | "skills"
+  | "runs"
+  | "inspector"
+  | "debug";
 
 type Props = {
   activeTab: DockTab;
   onTabChange: (tab: DockTab) => void;
   events: AgentEvent[];
+  appPlugins: AppPluginSummary[];
+  appPlugin: AppKnowledgePlugin | null;
+  selectedPackage: string;
+  selectedDevice: DeviceInfo | null;
+  selectedPageId: string | null;
+  exploring: boolean;
+  knowledgeError: string;
   skills: SkillRecord[];
   runs: RunRecord[];
   runSteps: ToolRecord[];
   selectedRunId: string | null;
   observation: Observation | null;
   selectedNode: UiNode | null;
+  debugSnapshot: DebugSnapshot | null;
+  efficiency: EfficiencyStats | null;
+  debugLoading: boolean;
+  debugError: string;
+  learning: boolean;
+  learningReport: LearningLoopReport | null;
+  onDebugCapture: () => void;
+  onRefreshStats: () => void;
+  onStartLearning: (input: {
+    maxCycles: number;
+    maxStepsPerCycle: number;
+    stopAfterStagnantCycles: number;
+  }) => void;
+  onStopLearning: () => void;
+  onExportDebug: () => void;
   onSelectNode: (node: UiNode) => void;
   onSelectRun: (runId: string) => void;
   onSkillStatus: (skillId: string, status: string) => void;
+  onSelectPackage: (packageName: string) => void;
+  onSelectPage: (pageId: string) => void;
+  onRefreshKnowledge: () => void;
+  onStartExploration: (maxSteps: number) => void;
+  onStopExploration: () => void;
+  onGenerateTests: () => void;
+  onRunTest: (testId: string) => void;
+  onExportPlugin: () => void;
+  onImportPlugin: (file: File) => void;
 };
 
 const tabs: Array<{ id: DockTab; label: string; icon: typeof Clock3 }> = [
   { id: "timeline", label: "执行轨迹", icon: Clock3 },
+  { id: "knowledge", label: "页面图谱", icon: Network },
   { id: "skills", label: "经验库", icon: LibraryBig },
   { id: "runs", label: "任务历史", icon: History },
   { id: "inspector", label: "UI 检查器", icon: ScanSearch },
+  { id: "debug", label: "调试台", icon: BugPlay },
 ];
 
 function statusLabel(status: string) {
@@ -61,15 +110,42 @@ export function BottomDock({
   activeTab,
   onTabChange,
   events,
+  appPlugins,
+  appPlugin,
+  selectedPackage,
+  selectedDevice,
+  selectedPageId,
+  exploring,
+  knowledgeError,
   skills,
   runs,
   runSteps,
   selectedRunId,
   observation,
   selectedNode,
+  debugSnapshot,
+  efficiency,
+  debugLoading,
+  debugError,
+  learning,
+  learningReport,
+  onDebugCapture,
+  onRefreshStats,
+  onStartLearning,
+  onStopLearning,
+  onExportDebug,
   onSelectNode,
   onSelectRun,
   onSkillStatus,
+  onSelectPackage,
+  onSelectPage,
+  onRefreshKnowledge,
+  onStartExploration,
+  onStopExploration,
+  onGenerateTests,
+  onRunTest,
+  onExportPlugin,
+  onImportPlugin,
 }: Props) {
   const pendingSkills = skills.filter((skill) => skill.status === "pending").length;
   const selectedRun = runs.find((run) => run.id === selectedRunId);
@@ -83,11 +159,15 @@ export function BottomDock({
             const count =
               tab.id === "timeline"
                 ? events.length
+                : tab.id === "knowledge"
+                  ? appPlugin?.pages.length || 0
                 : tab.id === "skills"
                   ? skills.length
                   : tab.id === "runs"
                     ? runs.length
-                    : observation?.nodes.length || 0;
+                    : tab.id === "debug"
+                      ? debugSnapshot?.artifacts.length || 0
+                      : observation?.nodes.length || 0;
             return (
               <button
                 key={tab.id}
@@ -142,6 +222,26 @@ export function BottomDock({
               ))}
             </div>
           )
+        ) : null}
+
+        {activeTab === "knowledge" ? (
+          <KnowledgePanel
+            plugins={appPlugins}
+            plugin={appPlugin}
+            selectedPackage={selectedPackage}
+            selectedPageId={selectedPageId}
+            exploring={exploring}
+            error={knowledgeError}
+            onSelectPackage={onSelectPackage}
+            onSelectPage={onSelectPage}
+            onRefresh={onRefreshKnowledge}
+            onStartExploration={onStartExploration}
+            onStopExploration={onStopExploration}
+            onGenerateTests={onGenerateTests}
+            onRunTest={onRunTest}
+            onExport={onExportPlugin}
+            onImport={onImportPlugin}
+          />
         ) : null}
 
         {activeTab === "skills" ? (
@@ -339,6 +439,25 @@ export function BottomDock({
               <span>采集当前屏幕后，可在这里浏览完整 accessibility 树。</span>
             </div>
           )
+        ) : null}
+
+        {activeTab === "debug" ? (
+          <DebugPanel
+            device={selectedDevice}
+            packageName={selectedPackage || observation?.package || ""}
+            snapshot={debugSnapshot}
+            stats={efficiency}
+            loading={debugLoading}
+            error={debugError}
+            events={events}
+            learning={learning}
+            learningReport={learningReport}
+            onCapture={onDebugCapture}
+            onRefreshStats={onRefreshStats}
+            onStartLearning={onStartLearning}
+            onStopLearning={onStopLearning}
+            onExport={onExportDebug}
+          />
         ) : null}
       </div>
     </section>

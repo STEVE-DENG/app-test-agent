@@ -20,7 +20,12 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { api, errorMessage, isTauriRuntime } from "./lib/api";
 import type {
   AgentEvent,
+  AppKnowledgePlugin,
+  AppPluginSummary,
+  DebugSnapshot,
   DeviceInfo,
+  EfficiencyStats,
+  LearningLoopReport,
   Observation,
   RunRecord,
   SaveSettingsInput,
@@ -41,6 +46,13 @@ function App() {
   const [observation, setObservation] = useState<Observation | null>(null);
   const [selectedNode, setSelectedNode] = useState<UiNode | null>(null);
   const [settings, setSettings] = useState<SettingsView | null>(null);
+  const [appPlugins, setAppPlugins] = useState<AppPluginSummary[]>([]);
+  const [appPlugin, setAppPlugin] = useState<AppKnowledgePlugin | null>(null);
+  const [selectedPackage, setSelectedPackage] = useState("");
+  const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
+  const [exploring, setExploring] = useState(false);
+  const [explorationRunId, setExplorationRunId] = useState<string | null>(null);
+  const [knowledgeError, setKnowledgeError] = useState("");
   const [skills, setSkills] = useState<SkillRecord[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -66,6 +78,14 @@ function App() {
   const [settingsTestResult, setSettingsTestResult] = useState("");
   const [settingsError, setSettingsError] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [debugSnapshot, setDebugSnapshot] = useState<DebugSnapshot | null>(null);
+  const [efficiency, setEfficiency] = useState<EfficiencyStats | null>(null);
+  const [debugLoading, setDebugLoading] = useState(false);
+  const [debugError, setDebugError] = useState("");
+  const [learning, setLearning] = useState(false);
+  const [learningRunId, setLearningRunId] = useState<string | null>(null);
+  const [learningReport, setLearningReport] =
+    useState<LearningLoopReport | null>(null);
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.serial === selectedSerial) || null,
@@ -85,6 +105,46 @@ function App() {
       setRuns(await api.listRuns());
     } catch (error) {
       setNotice({ tone: "error", message: errorMessage(error) });
+    }
+  }, []);
+
+  const refreshEfficiency = useCallback(
+    async (packageName?: string) => {
+      try {
+        setEfficiency(
+          await api.getEfficiencyStats(packageName || selectedPackage || undefined),
+        );
+      } catch (error) {
+        setDebugError(errorMessage(error));
+      }
+    },
+    [selectedPackage],
+  );
+
+  const refreshAppPlugins = useCallback(async (preferredPackage?: string) => {
+    try {
+      const summaries = await api.listAppPlugins();
+      setAppPlugins(summaries);
+      const targetPackage = preferredPackage || summaries[0]?.package || "";
+      setSelectedPackage((current) => preferredPackage || current || targetPackage);
+      if (!targetPackage) {
+        setAppPlugin(null);
+        setSelectedPageId(null);
+        return;
+      }
+      const plugin = await api.getAppPlugin(targetPackage);
+      setAppPlugin(plugin);
+      setSelectedPageId((current) =>
+        plugin.pages.some((page) => page.id === current)
+          ? current
+          : plugin.pages.find((page) => page.activity.endsWith("MainActivity"))
+              ?.id ||
+            plugin.pages[0]?.id ||
+            null,
+      );
+      setKnowledgeError("");
+    } catch (error) {
+      setKnowledgeError(errorMessage(error));
     }
   }, []);
 
@@ -115,11 +175,19 @@ function App() {
     void refreshDevices();
     void refreshSkills();
     void refreshRuns();
+    void refreshAppPlugins();
+    void refreshEfficiency();
     api
       .getSettings()
       .then(setSettings)
       .catch((error) => setNotice({ tone: "error", message: errorMessage(error) }));
-  }, [refreshDevices, refreshRuns, refreshSkills]);
+  }, [
+    refreshAppPlugins,
+    refreshDevices,
+    refreshEfficiency,
+    refreshRuns,
+    refreshSkills,
+  ]);
 
   useEffect(() => {
     if (!isTauriRuntime) return;
@@ -137,12 +205,15 @@ function App() {
             observation?: Observation;
             skills?: SkillRecord[];
             action?: string;
+            package?: string;
+            pageId?: string;
           }
         | null
         | undefined;
 
       if (data?.observation) {
         setObservation(data.observation);
+        setSelectedPageId(data.observation.pageId);
         setSelectedNode(null);
       }
       if (data?.skills) {
@@ -157,6 +228,71 @@ function App() {
       if (event.eventType === "run_started") {
         setRunning(true);
         setRunStatus("running");
+      }
+      if (event.eventType === "exploration_started") {
+        setExploring(true);
+        setExplorationRunId(event.runId);
+      }
+      if (event.eventType === "learning_started") {
+        setLearning(true);
+        setLearningRunId(event.runId);
+        setLearningReport(null);
+      }
+      if (event.eventType === "learning_round_completed") {
+        setLearning(true);
+      }
+      if (event.eventType === "learning_failed") {
+        setLearning(false);
+        setLearningRunId(null);
+        setNotice({ tone: "error", message: event.detail });
+      }
+      if (
+        ["exploration_completed", "exploration_cancelled"].includes(
+          event.eventType,
+        )
+      ) {
+        setExploring(false);
+        setExplorationRunId(null);
+        setNotice({ tone: "success", message: event.detail });
+      }
+      if (["learning_completed", "learning_cancelled"].includes(event.eventType)) {
+        setLearning(false);
+        setLearningRunId(null);
+        const report = (event.data as { report?: LearningLoopReport } | null)?.report;
+        if (report) setLearningReport(report);
+        setNotice({
+          tone: event.eventType === "learning_completed" ? "success" : "info",
+          message: event.detail,
+        });
+        void refreshAppPlugins(data?.package || selectedPackage || undefined);
+        void refreshEfficiency(data?.package || selectedPackage || undefined);
+      }
+      if (event.eventType.startsWith("test_")) {
+        void refreshAppPlugins(
+          data?.package ||
+            event.data?.package?.toString() ||
+            selectedPackage ||
+            undefined,
+        );
+      }
+      if (
+        ["test_completed", "test_failed"].includes(event.eventType)
+      ) {
+        setNotice({
+          tone: event.eventType === "test_completed" ? "success" : "info",
+          message: event.detail,
+        });
+      }
+      if (
+        data?.observation ||
+        event.eventType.startsWith("exploration_") ||
+        event.eventType.startsWith("knowledge_")
+      ) {
+        void refreshAppPlugins(
+          data?.package ||
+            data?.observation?.package ||
+            event.data?.package?.toString(),
+        );
       }
       if (
         ["run_completed", "run_failed", "run_cancelled", "needs_input"].includes(
@@ -180,6 +316,7 @@ function App() {
         });
         void refreshSkills();
         void refreshRuns();
+        void refreshEfficiency(selectedPackage || undefined);
       }
     })
       .then((cleanup) => {
@@ -194,7 +331,13 @@ function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [refreshRuns, refreshSkills]);
+  }, [
+    refreshAppPlugins,
+    refreshEfficiency,
+    refreshRuns,
+    refreshSkills,
+    selectedPackage,
+  ]);
 
   useEffect(() => {
     if (!notice) return;
@@ -217,6 +360,9 @@ function App() {
       const nextObservation = await api.captureObservation(selectedDevice.serial);
       setObservation(nextObservation);
       setSelectedNode(null);
+      setSelectedPageId(nextObservation.pageId);
+      await refreshAppPlugins(nextObservation.package);
+      void refreshEfficiency(nextObservation.package);
       setNotice({
         tone: "success",
         message: `已采集 ${nextObservation.nodes.length} 个 UI 节点`,
@@ -335,6 +481,228 @@ function App() {
       setRunSteps(await api.listRunSteps(id));
     } catch (error) {
       setNotice({ tone: "error", message: errorMessage(error) });
+    }
+  };
+
+  const handleSelectPackage = async (packageName: string) => {
+    setSelectedPackage(packageName);
+    setSelectedPageId(null);
+    setAppPlugin(null);
+    setKnowledgeError("");
+    if (!packageName) return;
+    try {
+      const plugin = await api.getAppPlugin(packageName);
+      setAppPlugin(plugin);
+      setSelectedPageId(
+        plugin.pages.find((page) => page.activity.endsWith("MainActivity"))
+          ?.id ||
+          plugin.pages[0]?.id ||
+          null,
+      );
+      void refreshEfficiency(packageName);
+    } catch (error) {
+      setKnowledgeError(errorMessage(error));
+    }
+  };
+
+  const handleStartExploration = async (maxSteps: number) => {
+    const packageName = observation?.package || selectedPackage;
+    if (!selectedDevice?.ready) {
+      setKnowledgeError("请先连接并选择一台 Android 设备");
+      return;
+    }
+    if (!packageName) {
+      setKnowledgeError("请先采集当前 App 页面，确定包名");
+      return;
+    }
+    setKnowledgeError("");
+    setExploring(true);
+    setActiveTab("knowledge");
+    try {
+      const nextRunId = await api.startExploration({
+        deviceSerial: selectedDevice.serial,
+        package: packageName,
+        maxSteps,
+      });
+      setExplorationRunId(nextRunId);
+      setNotice({
+        tone: "info",
+        message: `自动遍历已启动，最多 ${maxSteps} 步`,
+      });
+    } catch (error) {
+      setExploring(false);
+      setKnowledgeError(errorMessage(error));
+    }
+  };
+
+  const handleStopExploration = async () => {
+    if (!explorationRunId) return;
+    try {
+      await api.cancelTask(explorationRunId);
+      setNotice({ tone: "info", message: "正在停止自动遍历..." });
+    } catch (error) {
+      setKnowledgeError(errorMessage(error));
+    }
+  };
+
+  const handleDebugCapture = async () => {
+    if (!selectedDevice?.ready) {
+      setDebugError("请先连接并选择一台 Android 设备");
+      return;
+    }
+    setDebugLoading(true);
+    setDebugError("");
+    try {
+      const snapshot = await api.getDebugSnapshot({
+        deviceSerial: selectedDevice.serial,
+        package: selectedPackage || observation?.package || undefined,
+      });
+      setDebugSnapshot(snapshot);
+      setEfficiency(snapshot.efficiency);
+      setNotice({
+        tone: "success",
+        message: `调试快照已采集：${snapshot.nodeCount} 个节点，${snapshot.actionableNodeCount} 个可操作节点`,
+      });
+    } catch (error) {
+      setDebugError(errorMessage(error));
+    } finally {
+      setDebugLoading(false);
+    }
+  };
+
+  const handleStartLearning = async (input: {
+    maxCycles: number;
+    maxStepsPerCycle: number;
+    stopAfterStagnantCycles: number;
+  }) => {
+    if (!selectedDevice?.ready) {
+      setDebugError("请先连接并选择一台 Android 设备");
+      return;
+    }
+    const packageName = selectedPackage || observation?.package;
+    if (!packageName) {
+      setDebugError("请先采集当前 App 页面，确定包名");
+      return;
+    }
+    setDebugError("");
+    setLearning(true);
+    setLearningReport(null);
+    setActiveTab("debug");
+    try {
+      const nextRunId = await api.startLearningLoop({
+        deviceSerial: selectedDevice.serial,
+        package: packageName,
+        ...input,
+      });
+      setLearningRunId(nextRunId);
+      setNotice({
+        tone: "info",
+        message: `持续学习已启动，最多 ${input.maxCycles} 轮`,
+      });
+    } catch (error) {
+      setLearning(false);
+      setDebugError(errorMessage(error));
+    }
+  };
+
+  const handleStopLearning = async () => {
+    if (!learningRunId) return;
+    try {
+      await api.cancelTask(learningRunId);
+      setNotice({ tone: "info", message: "正在停止持续学习..." });
+    } catch (error) {
+      setDebugError(errorMessage(error));
+    }
+  };
+
+  const handleExportDebug = async () => {
+    if (!selectedDevice?.ready) return;
+    try {
+      const json = await api.exportDebugBundle({
+        deviceSerial: selectedDevice.serial,
+        package: selectedPackage || observation?.package || undefined,
+      });
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `debug-bundle-${Date.now()}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setNotice({ tone: "success", message: "调试包已导出" });
+    } catch (error) {
+      setDebugError(errorMessage(error));
+    }
+  };
+
+  const handleGenerateTests = async () => {
+    if (!selectedPackage) return;
+    try {
+      const generated = await api.generateAppTests(selectedPackage);
+      await refreshAppPlugins(selectedPackage);
+      setNotice({
+        tone: "success",
+        message: `已生成 ${generated.length} 条页面导航用例`,
+      });
+    } catch (error) {
+      setKnowledgeError(errorMessage(error));
+    }
+  };
+
+  const handleRunTest = async (testId: string) => {
+    if (!selectedDevice?.ready) {
+      setKnowledgeError("请先连接并选择一台 Android 设备");
+      return;
+    }
+    if (!selectedPackage) {
+      setKnowledgeError("请先选择 App 插件");
+      return;
+    }
+    try {
+      await api.startTestReplay({
+        deviceSerial: selectedDevice.serial,
+        package: selectedPackage,
+        testId,
+      });
+      setNotice({ tone: "info", message: "测试用例开始回放" });
+    } catch (error) {
+      setKnowledgeError(errorMessage(error));
+    }
+  };
+
+  const handleExportPlugin = async () => {
+    if (!selectedPackage) return;
+    try {
+      const json = await api.exportAppPlugin(selectedPackage);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${selectedPackage}.app-plugin.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setNotice({ tone: "success", message: "App 插件 JSON 已导出" });
+    } catch (error) {
+      setKnowledgeError(errorMessage(error));
+    }
+  };
+
+  const handleImportPlugin = async (file: File) => {
+    try {
+      const summary = await api.importAppPlugin(await file.text());
+      await refreshAppPlugins(summary.package);
+      setSelectedPageId(null);
+      setActiveTab("knowledge");
+      setNotice({
+        tone: "success",
+        message: `已导入 ${summary.name}：${summary.pages} 页面，${summary.testCases} 用例`,
+      });
+    } catch (error) {
+      setKnowledgeError(errorMessage(error));
     }
   };
 
@@ -492,15 +860,46 @@ function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         events={events}
+        appPlugins={appPlugins}
+        appPlugin={appPlugin}
+        selectedPackage={selectedPackage}
+        selectedDevice={selectedDevice}
+        selectedPageId={selectedPageId}
+        exploring={exploring}
+        knowledgeError={knowledgeError}
         skills={skills}
         runs={runs}
         runSteps={runSteps}
         selectedRunId={selectedRunId}
         observation={observation}
         selectedNode={selectedNode}
+        debugSnapshot={debugSnapshot}
+        efficiency={efficiency}
+        debugLoading={debugLoading}
+        debugError={debugError}
+        learning={learning}
+        learningReport={learningReport}
+        onDebugCapture={() => void handleDebugCapture()}
+        onRefreshStats={() =>
+          void refreshEfficiency(selectedPackage || observation?.package)
+        }
+        onStartLearning={(input) => void handleStartLearning(input)}
+        onStopLearning={() => void handleStopLearning()}
+        onExportDebug={() => void handleExportDebug()}
         onSelectNode={setSelectedNode}
         onSelectRun={(id) => void handleSelectRun(id)}
         onSkillStatus={(id, status) => void handleSkillStatus(id, status)}
+        onSelectPackage={(packageName) => void handleSelectPackage(packageName)}
+        onSelectPage={setSelectedPageId}
+        onRefreshKnowledge={() =>
+          void refreshAppPlugins(selectedPackage || observation?.package)
+        }
+        onStartExploration={(maxSteps) => void handleStartExploration(maxSteps)}
+        onStopExploration={() => void handleStopExploration()}
+        onGenerateTests={() => void handleGenerateTests()}
+        onRunTest={(testId) => void handleRunTest(testId)}
+        onExportPlugin={() => void handleExportPlugin()}
+        onImportPlugin={(file) => void handleImportPlugin(file)}
       />
 
       <SettingsDialog

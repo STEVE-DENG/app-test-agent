@@ -6,7 +6,9 @@ use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::models::{RunRecord, SkillHint, SkillPlanStep, SkillRecord, ToolRecord};
+use crate::models::{
+    EfficiencyStats, RunRecord, SkillHint, SkillPlanStep, SkillRecord, ToolRecord,
+};
 
 pub struct AppStore {
     connection: Mutex<Connection>,
@@ -73,6 +75,18 @@ impl AppStore {
 
                 CREATE INDEX IF NOT EXISTS idx_skills_status
                 ON skills(status);
+
+                CREATE TABLE IF NOT EXISTS step_metrics (
+                    run_id TEXT NOT NULL,
+                    step_index INTEGER NOT NULL,
+                    model_ms INTEGER NOT NULL DEFAULT 0,
+                    tool_ms INTEGER NOT NULL DEFAULT 0,
+                    observation_ms INTEGER NOT NULL DEFAULT 0,
+                    knowledge_ms INTEGER NOT NULL DEFAULT 0,
+                    total_ms INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, step_index)
+                );
                 "#,
             )
             .map_err(|error| format!("初始化任务数据库失败: {error}"))?;
@@ -129,6 +143,45 @@ impl AppStore {
                 ],
             )
             .map_err(|error| format!("保存执行步骤失败: {error}"))?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_step_metric(
+        &self,
+        run_id: &str,
+        step_index: u32,
+        model_ms: u64,
+        tool_ms: u64,
+        observation_ms: u64,
+        knowledge_ms: u64,
+        total_ms: u64,
+    ) -> Result<(), String> {
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "INSERT INTO step_metrics (
+                    run_id, step_index, model_ms, tool_ms, observation_ms,
+                    knowledge_ms, total_ms, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(run_id, step_index) DO UPDATE SET
+                    model_ms = excluded.model_ms,
+                    tool_ms = excluded.tool_ms,
+                    observation_ms = excluded.observation_ms,
+                    knowledge_ms = excluded.knowledge_ms,
+                    total_ms = excluded.total_ms",
+                params![
+                    run_id,
+                    step_index,
+                    model_ms,
+                    tool_ms,
+                    observation_ms,
+                    knowledge_ms,
+                    total_ms,
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|error| format!("保存步骤耗时失败: {error}"))?;
         Ok(())
     }
 
@@ -233,6 +286,7 @@ impl AppStore {
         package: &str,
         records: &[ToolRecord],
     ) -> Result<Option<SkillRecord>, String> {
+        let mut seen_steps = HashSet::new();
         let executable = records
             .iter()
             .filter(|record| {
@@ -241,7 +295,17 @@ impl AppStore {
                     "observe_screen" | "finish" | "ask_user"
                 )
             })
-            .take(16)
+            .filter(|record| !is_redundant_step(record))
+            .filter(|record| {
+                seen_steps.insert(format!(
+                    "{}|{}|{}|{}",
+                    record.tool,
+                    record.args,
+                    record.page_signature_before,
+                    record.page_signature_after
+                ))
+            })
+            .take(20)
             .collect::<Vec<_>>();
         if executable.len() < 2 {
             return Ok(None);
@@ -471,6 +535,93 @@ impl AppStore {
         Ok(existing.is_some())
     }
 
+    pub fn efficiency_stats(&self) -> Result<EfficiencyStats, String> {
+        let connection = self.lock()?;
+        let (
+            total_runs,
+            completed_runs,
+            failed_runs,
+            total_steps,
+            total_model_ms,
+            total_tool_ms,
+            total_observation_ms,
+            total_knowledge_ms,
+            total_step_ms,
+            avg_step_ms,
+        ) = connection
+            .query_row(
+                "SELECT
+                    COUNT(*) AS total_runs,
+                    COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status IN ('failed', 'cancelled') THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(steps), 0),
+                    COALESCE((SELECT SUM(model_ms) FROM step_metrics), 0),
+                    COALESCE((SELECT SUM(tool_ms) FROM step_metrics), 0),
+                    COALESCE((SELECT SUM(observation_ms) FROM step_metrics), 0),
+                    COALESCE((SELECT SUM(knowledge_ms) FROM step_metrics), 0),
+                    COALESCE((SELECT SUM(total_ms) FROM step_metrics), 0),
+                    COALESCE((SELECT AVG(total_ms) FROM step_metrics), 0)
+                 FROM runs",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u32,
+                        row.get::<_, i64>(1)? as u32,
+                        row.get::<_, i64>(2)? as u32,
+                        row.get::<_, i64>(3)? as u32,
+                        row.get::<_, i64>(4)? as u64,
+                        row.get::<_, i64>(5)? as u64,
+                        row.get::<_, i64>(6)? as u64,
+                        row.get::<_, i64>(7)? as u64,
+                        row.get::<_, i64>(8)? as u64,
+                        row.get::<_, f64>(9)?,
+                    ))
+                },
+            )
+            .map_err(|error| format!("查询运行效率失败: {error}"))?;
+        let pending_skills = connection
+            .query_row(
+                "SELECT COUNT(*) FROM skills WHERE status = 'pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("查询待审核 Skill 失败: {error}"))?
+            as u32;
+        let approved_skills = connection
+            .query_row(
+                "SELECT COUNT(*) FROM skills WHERE status = 'approved'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("查询已批准 Skill 失败: {error}"))?
+            as u32;
+        let avg_steps = if total_runs == 0 {
+            0.0
+        } else {
+            total_steps as f64 / total_runs as f64
+        };
+        Ok(EfficiencyStats {
+            total_runs,
+            completed_runs,
+            failed_runs,
+            total_steps,
+            avg_steps,
+            total_model_ms,
+            total_tool_ms,
+            total_observation_ms,
+            total_knowledge_ms,
+            total_step_ms,
+            avg_step_ms,
+            pending_skills,
+            approved_skills,
+            pages: 0,
+            transitions: 0,
+            test_cases: 0,
+            artifacts: 0,
+            updated_at: Utc::now().to_rfc3339(),
+        })
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
         self.connection
             .lock()
@@ -549,6 +700,22 @@ fn result_summary(result: &serde_json::Value) -> String {
         .chars()
         .take(80)
         .collect()
+}
+
+fn is_redundant_step(record: &ToolRecord) -> bool {
+    if record.tool == "wait" && record.page_signature_before == record.page_signature_after {
+        return true;
+    }
+    if matches!(
+        record.tool.as_str(),
+        "tap" | "tap_text" | "tap_id" | "long_press"
+    ) && record.page_signature_before == record.page_signature_after
+    {
+        return true;
+    }
+    let args = record.args.to_string();
+    let result = record.result.to_string();
+    args == "{}" && result.is_empty()
 }
 
 #[cfg(test)]

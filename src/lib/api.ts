@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppKnowledgePlugin,
+  AppPluginSummary,
+  AppTestCase,
+  DebugSnapshot,
   DeviceInfo,
+  EfficiencyStats,
   Observation,
   RunRecord,
   SaveSettingsInput,
@@ -54,6 +59,44 @@ const tauriApi = {
   listSkills: () => invoke<SkillRecord[]>("list_skills"),
   setSkillStatus: (skillId: string, status: string) =>
     invoke<void>("set_skill_status", { skillId, status }),
+  listAppPlugins: () => invoke<AppPluginSummary[]>("list_app_plugins"),
+  getAppPlugin: (packageName: string) =>
+    invoke<AppKnowledgePlugin>("get_app_plugin", { package: packageName }),
+  exportAppPlugin: (packageName: string) =>
+    invoke<string>("export_app_plugin", { package: packageName }),
+  importAppPlugin: (json: string) =>
+    invoke<AppPluginSummary>("import_app_plugin", { json }),
+  generateAppTests: (packageName: string) =>
+    invoke<AppTestCase[]>("generate_app_tests", { package: packageName }),
+  readArtifact: (path: string) =>
+    invoke<string>("read_artifact", { path }),
+  readTextArtifact: (path: string) =>
+    invoke<string>("read_text_artifact", { path }),
+  getEfficiencyStats: (packageName?: string) =>
+    invoke<EfficiencyStats>("get_efficiency_stats", {
+      package: packageName || null,
+    }),
+  getDebugSnapshot: (input: { deviceSerial: string; package?: string }) =>
+    invoke<DebugSnapshot>("get_debug_snapshot", { input }),
+  exportDebugBundle: (input: { deviceSerial: string; package?: string }) =>
+    invoke<string>("export_debug_bundle", { input }),
+  startExploration: (input: {
+    deviceSerial: string;
+    package: string;
+    maxSteps: number;
+  }) => invoke<string>("start_exploration", { input }),
+  startTestReplay: (input: {
+    deviceSerial: string;
+    package: string;
+    testId: string;
+  }) => invoke<string>("start_test_replay", input),
+  startLearningLoop: (input: {
+    deviceSerial: string;
+    package: string;
+    maxCycles: number;
+    maxStepsPerCycle: number;
+    stopAfterStagnantCycles: number;
+  }) => invoke<string>("start_learning_loop", { input }),
 };
 
 const browserPreviewApi: typeof tauriApi = {
@@ -85,6 +128,39 @@ const browserPreviewApi: typeof tauriApi = {
   listRunSteps: () => Promise.resolve([]),
   listSkills: () => Promise.resolve([]),
   setSkillStatus: () => previewOnly("审核 Skill"),
+  listAppPlugins: () => Promise.resolve([]),
+  getAppPlugin: () => previewOnly("读取 App 插件"),
+  exportAppPlugin: () => previewOnly("导出 App 插件"),
+  importAppPlugin: () => previewOnly("导入 App 插件"),
+  generateAppTests: () => previewOnly("生成测试用例"),
+  readArtifact: () => previewOnly("读取页面截图"),
+  readTextArtifact: () => previewOnly("读取调试文本"),
+  getEfficiencyStats: () =>
+    Promise.resolve({
+      totalRuns: 0,
+      completedRuns: 0,
+      failedRuns: 0,
+      totalSteps: 0,
+      avgSteps: 0,
+      totalModelMs: 0,
+      totalToolMs: 0,
+      totalObservationMs: 0,
+      totalKnowledgeMs: 0,
+      totalStepMs: 0,
+      avgStepMs: 0,
+      pendingSkills: 0,
+      approvedSkills: 0,
+      pages: 0,
+      transitions: 0,
+      testCases: 0,
+      artifacts: 0,
+      updatedAt: new Date().toISOString(),
+    }),
+  getDebugSnapshot: () => previewOnly("采集调试快照"),
+  exportDebugBundle: () => previewOnly("导出调试包"),
+  startExploration: () => previewOnly("自动遍历 App"),
+  startTestReplay: () => previewOnly("回放测试用例"),
+  startLearningLoop: () => previewOnly("启动持续学习"),
 };
 
 export const api = isTauriRuntime ? tauriApi : browserPreviewApi;

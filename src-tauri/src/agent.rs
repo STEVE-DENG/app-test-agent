@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 
 use crate::device;
+use crate::knowledge::KnowledgeStore;
 use crate::models::{
     AgentEvent, AgentRunResult, ModelDecision, Observation, RawModelDecision, SkillHint,
     StoredSettings, ToolRecord, UiNode,
@@ -48,8 +49,9 @@ const ALLOWED_TOOLS: &[&str] = &[
 const CONNECTION_TEST_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 pub struct AgentDeps {
-    pub app: AppHandle,
+    pub app: Option<AppHandle>,
     pub store: Arc<AppStore>,
+    pub knowledge: Arc<KnowledgeStore>,
     pub settings: StoredSettings,
     pub artifacts_dir: PathBuf,
     pub cancellation: Arc<AtomicBool>,
@@ -84,7 +86,7 @@ pub async fn run_agent(
     deps.store
         .begin_run(&run_id, &instruction, &device_serial, &deps.settings.model)?;
     emit(
-        &deps.app,
+        deps.app.as_ref(),
         &run_id,
         "run_started",
         "开始执行",
@@ -98,7 +100,7 @@ pub async fn run_agent(
         Err(error) => {
             let _ = deps.store.finish_run(&run_id, "failed", &error, 0, None);
             emit(
-                &deps.app,
+                deps.app.as_ref(),
                 &run_id,
                 "run_failed",
                 "任务失败",
@@ -194,6 +196,7 @@ async fn execute_run(
     instruction: &str,
     device_serial: &str,
 ) -> Result<AgentRunResult, String> {
+    let observation_started = Instant::now();
     let mut observation = device::capture_observation(
         device_serial,
         &deps.artifacts_dir,
@@ -201,6 +204,18 @@ async fn execute_run(
         "step-00-initial",
     )
     .await?;
+    let _initial_observation_ms = observation_started.elapsed().as_millis() as u64;
+    if let Err(error) = deps.knowledge.register_observation(&observation) {
+        emit(
+            deps.app.as_ref(),
+            run_id,
+            "knowledge_warning",
+            "页面知识写入失败",
+            &error,
+            0,
+            None,
+        );
+    }
     emit_observation(deps, run_id, 0, &observation);
 
     let skills = deps
@@ -213,7 +228,7 @@ async fn execute_run(
             .collect::<Vec<_>>();
         deps.store.mark_skills_used(&skill_ids)?;
         emit(
-            &deps.app,
+            deps.app.as_ref(),
             run_id,
             "skill_recall",
             "召回历史技能",
@@ -232,6 +247,7 @@ async fn execute_run(
     let mut last_error: Option<String> = None;
 
     for step_index in 1..=deps.settings.max_steps {
+        let step_started = Instant::now();
         if deps.cancellation.load(Ordering::Relaxed) {
             let summary = "任务已由用户停止";
             let skill_ids = skills
@@ -242,7 +258,7 @@ async fn execute_run(
             deps.store
                 .finish_run(run_id, "cancelled", summary, step_index - 1, None)?;
             emit(
-                &deps.app,
+                deps.app.as_ref(),
                 run_id,
                 "run_cancelled",
                 "任务已停止",
@@ -259,6 +275,7 @@ async fn execute_run(
             });
         }
 
+        let model_started = Instant::now();
         let decision = match ask_model(
             &deps.settings,
             instruction,
@@ -281,7 +298,7 @@ async fn execute_run(
                 deps.store
                     .finish_run(run_id, "failed", &error, step_index - 1, None)?;
                 emit(
-                    &deps.app,
+                    deps.app.as_ref(),
                     run_id,
                     "run_failed",
                     "模型决策失败",
@@ -292,10 +309,11 @@ async fn execute_run(
                 return Err(error);
             }
         };
+        let model_ms = model_started.elapsed().as_millis() as u64;
         last_error = None;
 
         emit(
-            &deps.app,
+            deps.app.as_ref(),
             run_id,
             "thought",
             "Agent 判断",
@@ -342,6 +360,15 @@ async fn execute_run(
             };
             deps.store.save_step_for_run(run_id, &finish_record)?;
             records.push(finish_record);
+            deps.store.save_step_metric(
+                run_id,
+                step_index,
+                model_ms,
+                0,
+                0,
+                0,
+                step_started.elapsed().as_millis() as u64,
+            )?;
 
             let skill_ids = skills
                 .iter()
@@ -366,7 +393,7 @@ async fn execute_run(
                 skill_candidate_id.as_deref(),
             )?;
             emit(
-                &deps.app,
+                deps.app.as_ref(),
                 run_id,
                 if success {
                     "run_completed"
@@ -411,6 +438,15 @@ async fn execute_run(
             };
             deps.store.save_step_for_run(run_id, &ask_record)?;
             records.push(ask_record);
+            deps.store.save_step_metric(
+                run_id,
+                step_index,
+                model_ms,
+                0,
+                0,
+                0,
+                step_started.elapsed().as_millis() as u64,
+            )?;
             let skill_ids = skills
                 .iter()
                 .map(|skill| skill.id.clone())
@@ -419,7 +455,7 @@ async fn execute_run(
             deps.store
                 .finish_run(run_id, "needs_input", question, step_index, None)?;
             emit(
-                &deps.app,
+                deps.app.as_ref(),
                 run_id,
                 "needs_input",
                 "需要你的补充",
@@ -438,9 +474,11 @@ async fn execute_run(
 
         let before_signature = observation.page_signature.clone();
         let screenshot_path = observation.screenshot_path.clone();
+        let tool_started = Instant::now();
         let tool_result = match execute_tool(device_serial, &decision, &observation).await {
             Ok(result) => result,
             Err(error) => {
+                let tool_ms = tool_started.elapsed().as_millis() as u64;
                 let result = json!({ "error": error.clone() });
                 let record = ToolRecord {
                     step_index,
@@ -454,6 +492,15 @@ async fn execute_run(
                     created_at: Utc::now().to_rfc3339(),
                 };
                 deps.store.save_step_for_run(run_id, &record)?;
+                deps.store.save_step_metric(
+                    run_id,
+                    step_index,
+                    model_ms,
+                    tool_ms,
+                    0,
+                    0,
+                    step_started.elapsed().as_millis() as u64,
+                )?;
                 records.push(record);
                 history.push(format!(
                     "#{step_index} {} {} -> ERROR: {}",
@@ -461,7 +508,7 @@ async fn execute_run(
                 ));
                 last_error = Some(error.clone());
                 emit(
-                    &deps.app,
+                    deps.app.as_ref(),
                     run_id,
                     "tool_error",
                     &format!("工具失败 · {}", decision.action),
@@ -476,7 +523,9 @@ async fn execute_run(
                 continue;
             }
         };
+        let tool_ms = tool_started.elapsed().as_millis() as u64;
 
+        let observation_started = Instant::now();
         let after_observation = device::capture_observation(
             device_serial,
             &deps.artifacts_dir,
@@ -485,6 +534,29 @@ async fn execute_run(
         )
         .await
         .unwrap_or_else(|_| observation.clone());
+        let observation_ms = observation_started.elapsed().as_millis() as u64;
+        let knowledge_started = Instant::now();
+        if let Err(error) = deps.knowledge.record_action(
+            run_id,
+            step_index,
+            &observation,
+            &after_observation,
+            &decision.action,
+            &decision.args,
+            &tool_result,
+            true,
+        ) {
+            emit(
+                deps.app.as_ref(),
+                run_id,
+                "knowledge_warning",
+                "页面关系写入失败",
+                &error,
+                step_index,
+                None,
+            );
+        }
+        let knowledge_ms = knowledge_started.elapsed().as_millis() as u64;
 
         let record = ToolRecord {
             step_index,
@@ -498,6 +570,15 @@ async fn execute_run(
             created_at: Utc::now().to_rfc3339(),
         };
         deps.store.save_step_for_run(run_id, &record)?;
+        deps.store.save_step_metric(
+            run_id,
+            step_index,
+            model_ms,
+            tool_ms,
+            observation_ms,
+            knowledge_ms,
+            step_started.elapsed().as_millis() as u64,
+        )?;
         records.push(record);
         history.push(format!(
             "#{step_index} {} {} -> {}",
@@ -505,7 +586,7 @@ async fn execute_run(
         ));
         emit_observation(deps, run_id, step_index, &after_observation);
         emit(
-            &deps.app,
+            deps.app.as_ref(),
             run_id,
             "tool_result",
             &format!("执行 · {}", decision.action),
@@ -533,7 +614,7 @@ async fn execute_run(
     deps.store
         .finish_run(run_id, "failed", &summary, deps.settings.max_steps, None)?;
     emit(
-        &deps.app,
+        deps.app.as_ref(),
         run_id,
         "run_failed",
         "达到最大步数",
@@ -965,7 +1046,7 @@ fn chat_endpoint(base_url: &str) -> String {
 
 fn emit_observation(deps: &AgentDeps, run_id: &str, step_index: u32, observation: &Observation) {
     emit(
-        &deps.app,
+        deps.app.as_ref(),
         run_id,
         "observation",
         "屏幕观察",
@@ -981,7 +1062,7 @@ fn emit_observation(deps: &AgentDeps, run_id: &str, step_index: u32, observation
 }
 
 fn emit(
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     run_id: &str,
     event_type: &str,
     title: &str,
@@ -989,6 +1070,9 @@ fn emit(
     step_index: u32,
     data: Option<Value>,
 ) {
+    let Some(app) = app else {
+        return;
+    };
     let _ = app.emit(
         "agent-event",
         AgentEvent {

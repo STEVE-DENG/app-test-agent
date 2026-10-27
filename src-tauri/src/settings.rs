@@ -78,9 +78,9 @@ pub fn settings_view(settings: &StoredSettings) -> SettingsView {
 
 fn default_settings() -> StoredSettings {
     StoredSettings {
-        base_url: "https://api.openai.com/v1".to_string(),
-        api_key: String::new(),
-        model: "gpt-4.1".to_string(),
+        base_url: "http://127.0.0.1:3425/v1".to_string(),
+        api_key: "magpie".to_string(),
+        model: "opencode-go/deepseek-v4.1-flash".to_string(),
         use_vision: true,
         temperature: 0.2,
         max_steps: 24,
