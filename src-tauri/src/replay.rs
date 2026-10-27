@@ -43,7 +43,7 @@ pub async fn run_test_case(
 
     device::restart_app_cleanly(&device_serial, &package).await?;
     let mut observation = capture(&deps, &device_serial, &run_id, "test-000-initial").await?;
-    let plugin = deps.knowledge.get_plugin(&package)?;
+    let mut plugin = deps.knowledge.get_plugin(&package)?;
     if !same_page(&plugin, &test_case.start_page_id, &observation.page_id) {
         let message = format!(
             "起始页面不匹配：期望 {}，实际 {}",
@@ -65,7 +65,7 @@ pub async fn run_test_case(
     let mut passed_steps = 0_u32;
     for (index, step) in test_case.steps.iter().enumerate() {
         let before = observation.clone();
-        let result = execute_step(&device_serial, &before, step).await;
+        let result = execute_step(&device_serial, &before, step, &plugin).await;
         match result {
             Ok(result) => {
                 device::wait_ms(700).await;
@@ -86,6 +86,7 @@ pub async fn run_test_case(
                     &result,
                     true,
                 )?;
+                plugin = deps.knowledge.get_plugin(&package)?;
                 let matched = same_page(&plugin, &step.expected_page_id, &after.page_id);
                 emit(
                     deps.app.as_ref(),
@@ -228,9 +229,9 @@ async fn execute_step(
     serial: &str,
     observation: &Observation,
     step: &crate::models::TestCaseStep,
+    plugin: &AppKnowledgePlugin,
 ) -> Result<Value, String> {
-    let node = find_node(observation, &step.element_key)
-        .or_else(|| device::find_node_by_text(&observation.nodes, &step.label));
+    let node = find_node_for_step(observation, step, plugin);
     match step.action.as_str() {
         "tap_text" | "tap_id" | "tap" => {
             let target = node.ok_or_else(|| format!("当前页面找不到控件：{}", step.label))?;
@@ -238,8 +239,14 @@ async fn execute_step(
             let message = device::tap(serial, x, y).await?;
             Ok(json!({
                 "message": message,
-                "elementKey": step.element_key,
-                "label": step.label,
+                "elementKey": element_key(target),
+                "label": if target.text.trim().is_empty() {
+                    target.content_description.trim()
+                } else {
+                    target.text.trim()
+                },
+                "resourceId": target.resource_id,
+                "className": target.class_name,
                 "bounds": target.bounds
             }))
         }
@@ -312,12 +319,136 @@ async fn execute_step(
     }
 }
 
-fn find_node<'a>(observation: &'a Observation, key: &str) -> Option<&'a UiNode> {
+fn find_node_by_key<'a>(observation: &'a Observation, key: &str) -> Option<&'a UiNode> {
+    if key.trim().is_empty() {
+        return None;
+    }
     observation
         .nodes
         .iter()
         .filter(|node| node.is_actionable())
         .find(|node| element_key(node) == key)
+}
+
+fn find_node_for_step<'a>(
+    observation: &'a Observation,
+    step: &crate::models::TestCaseStep,
+    plugin: &AppKnowledgePlugin,
+) -> Option<&'a UiNode> {
+    let args_element_key = step
+        .args
+        .get("elementKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    find_node_by_key(observation, args_element_key)
+        .or_else(|| find_node_from_knowledge(observation, step, plugin, args_element_key))
+        .or_else(|| {
+            step.args
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(|text| device::find_node_by_text(&observation.nodes, text))
+        })
+        .or_else(|| find_node_by_key(observation, &step.element_key))
+        .or_else(|| find_node_from_knowledge(observation, step, plugin, &step.element_key))
+        .or_else(|| {
+            step.args
+                .get("resource_id")
+                .and_then(Value::as_str)
+                .filter(|resource_id| is_specific_resource_id(resource_id))
+                .and_then(|resource_id| device::find_node_by_id(&observation.nodes, resource_id))
+        })
+        .or_else(|| device::find_node_by_text(&observation.nodes, &step.label))
+        .or_else(|| find_node_by_legacy_label(&observation.nodes, &step.label))
+}
+
+fn find_node_from_knowledge<'a>(
+    observation: &'a Observation,
+    step: &crate::models::TestCaseStep,
+    plugin: &AppKnowledgePlugin,
+    key: &str,
+) -> Option<&'a UiNode> {
+    if key.trim().is_empty() {
+        return None;
+    }
+    for page_id in [&step.from_page_id, &step.expected_page_id] {
+        let Some(page) = plugin.pages.iter().find(|page| page.id == *page_id) else {
+            continue;
+        };
+        let Some(element) = page.elements.iter().find(|element| element.key == key) else {
+            continue;
+        };
+        if let Some(node) = find_node_for_element(&observation.nodes, element) {
+            return Some(node);
+        }
+    }
+    None
+}
+
+fn find_node_for_element<'a>(
+    nodes: &'a [UiNode],
+    element: &crate::models::KnowledgeElement,
+) -> Option<&'a UiNode> {
+    for value in [&element.text, &element.content_description] {
+        for variant in semantic_variants(value) {
+            if let Some(node) = device::find_node_by_text(nodes, &variant) {
+                return Some(node);
+            }
+        }
+    }
+    if is_specific_resource_id(&element.resource_id)
+        && let Some(node) = device::find_node_by_id(nodes, &element.resource_id)
+    {
+        return Some(node);
+    }
+    nodes
+        .iter()
+        .filter(|node| node.is_actionable() && node.class_name == element.class_name)
+        .filter(|node| {
+            (node.bounds.top - element.bounds.top).abs() <= 80
+                && (node.bounds.left - element.bounds.left).abs() <= 80
+        })
+        .min_by_key(|node| {
+            (node.bounds.top - element.bounds.top).abs()
+                + (node.bounds.left - element.bounds.left).abs()
+        })
+}
+
+fn semantic_variants(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut variants = vec![trimmed.to_string()];
+    for separator in ['\n', '，', ','] {
+        if let Some(prefix) = trimmed.split(separator).next() {
+            let prefix = prefix.trim();
+            if prefix.chars().count() >= 2 && prefix != trimmed {
+                variants.push(prefix.to_string());
+            }
+        }
+    }
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
+fn is_specific_resource_id(resource_id: &str) -> bool {
+    let resource_id = resource_id.trim();
+    !resource_id.is_empty()
+        && !resource_id.ends_with(":id/tab")
+        && !resource_id.ends_with(":id/tab_title")
+        && !resource_id.ends_with(":id/tab_icon")
+}
+
+fn find_node_by_legacy_label<'a>(nodes: &'a [UiNode], label: &str) -> Option<&'a UiNode> {
+    let mut parts = label.trim().rsplitn(2, char::is_whitespace);
+    let top = parts.next()?.parse::<i32>().ok()?;
+    let class_name = parts.next()?.trim();
+    nodes
+        .iter()
+        .filter(|node| node.is_actionable() && node.class_name == class_name)
+        .min_by_key(|node| (node.bounds.top - top).abs())
+        .filter(|node| (node.bounds.top - top).abs() <= 120)
 }
 
 fn same_page(plugin: &AppKnowledgePlugin, expected_id: &str, actual_id: &str) -> bool {
@@ -326,11 +457,50 @@ fn same_page(plugin: &AppKnowledgePlugin, expected_id: &str, actual_id: &str) ->
     }
     let expected = plugin.pages.iter().find(|page| page.id == expected_id);
     let actual = plugin.pages.iter().find(|page| page.id == actual_id);
-    matches!(
-        (expected, actual),
-        (Some(left), Some(right))
-            if left.activity == right.activity && left.name == right.name
-    )
+    let (Some(left), Some(right)) = (expected, actual) else {
+        return false;
+    };
+    if left.activity != right.activity {
+        return false;
+    }
+    if left.name == right.name && !is_weak_page_name(&left.name) {
+        return true;
+    }
+    page_similarity(left, right) >= 0.25
+}
+
+fn is_weak_page_name(name: &str) -> bool {
+    name.starts_with("闲鱼 ·") || name.contains("Activity") || name.trim().is_empty()
+}
+
+fn page_similarity(
+    left: &crate::models::KnowledgePage,
+    right: &crate::models::KnowledgePage,
+) -> f64 {
+    let left_tokens = page_tokens(left);
+    let right_tokens = page_tokens(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0.0;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count() as f64;
+    let union = left_tokens.union(&right_tokens).count() as f64;
+    intersection / union
+}
+
+fn page_tokens(page: &crate::models::KnowledgePage) -> std::collections::HashSet<String> {
+    page.elements
+        .iter()
+        .filter(|element| element.clickable || element.scrollable || element.focusable)
+        .flat_map(|element| {
+            [
+                element.resource_id.trim(),
+                element.text.trim(),
+                element.content_description.trim(),
+            ]
+        })
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_lowercase())
+        .collect()
 }
 
 fn page_label(plugin: &AppKnowledgePlugin, page_id: &str) -> String {

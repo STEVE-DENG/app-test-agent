@@ -1863,6 +1863,13 @@ code {
   text-anchor: end;
 }
 
+.graph-coverage {
+  fill: var(--teal);
+  font-family: "SFMono-Regular", monospace;
+  font-size: 6px;
+  text-anchor: end;
+}
+
 .page-preview-and-elements {
   display: flex;
   flex: 1;
@@ -1970,6 +1977,105 @@ code {
   font-family: "SFMono-Regular", monospace;
   font-size: 5.7px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.page-coverage {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 6px;
+  background: rgba(12, 109, 100, 0.045);
+  border: 1px solid rgba(12, 109, 100, 0.12);
+  border-radius: 7px;
+}
+
+.page-coverage-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.page-coverage-head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.page-coverage-head strong {
+  color: var(--teal);
+  font-family: "Newsreader Variable", serif;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.page-coverage-head > span {
+  color: var(--ink-mute);
+  font-size: 6.3px;
+  text-align: right;
+}
+
+.coverage-bar {
+  height: 3px;
+  overflow: hidden;
+  background: rgba(32, 33, 29, 0.08);
+  border-radius: 99px;
+}
+
+.coverage-bar i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--teal), #35a77e);
+  border-radius: inherit;
+  transition: width 220ms ease;
+}
+
+.uncovered-actions {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.uncovered-actions > span {
+  color: var(--ink-mute);
+  font-family: "SFMono-Regular", monospace;
+  font-size: 5.8px;
+  letter-spacing: 0.05em;
+}
+
+.uncovered-actions > div {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  padding-bottom: 1px;
+}
+
+.uncovered-actions button {
+  flex: 0 0 auto;
+  max-width: 92px;
+  overflow: hidden;
+  padding: 3px 5px;
+  color: var(--orange-deep);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(255, 91, 53, 0.06);
+  border: 1px solid rgba(255, 91, 53, 0.14);
+  border-radius: 4px;
+  font-size: 6px;
+  cursor: pointer;
+}
+
+.uncovered-actions button:hover {
+  background: rgba(255, 91, 53, 0.12);
+  border-color: rgba(255, 91, 53, 0.28);
+}
+
+.uncovered-actions small {
+  color: var(--teal);
+  font-size: 6px;
   white-space: nowrap;
 }
 

@@ -15,6 +15,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "../lib/api";
 import type {
+  ActionTrace,
   AppKnowledgePlugin,
   AppPluginSummary,
   KnowledgeElement,
@@ -149,6 +150,174 @@ function testStatus(status: string) {
   return "已生成";
 }
 
+type ElementCoverage = {
+  element: KnowledgeElement;
+  attempts: number;
+  successes: number;
+  transitions: number;
+};
+
+type PageCoverage = {
+  page: KnowledgePage;
+  elements: ElementCoverage[];
+  actionable: number;
+  attempted: number;
+  verified: number;
+  coveragePercent: number;
+  verifiedPercent: number;
+  uncovered: KnowledgeElement[];
+};
+
+type PluginCoverage = {
+  pages: Map<string, PageCoverage>;
+  actionable: number;
+  attempted: number;
+  verified: number;
+  coveragePercent: number;
+};
+
+function coverageElementLabel(element: KnowledgeElement) {
+  return (
+    element.text ||
+    element.contentDescription ||
+    element.resourceId ||
+    element.className.split(".").slice(-1)[0] ||
+    ""
+  ).trim();
+}
+
+function isCoverageElement(element: KnowledgeElement) {
+  return (
+    (element.clickable || element.scrollable || element.focusable) &&
+    coverageElementLabel(element).length > 0
+  );
+}
+
+function actionMatchesElement(
+  action: ActionTrace,
+  pageId: string,
+  element: KnowledgeElement,
+) {
+  if (action.fromPageId !== pageId) return false;
+  const elementKeyValue = action.args.elementKey;
+  if (typeof elementKeyValue === "string" && elementKeyValue === element.key) {
+    return true;
+  }
+  const resourceId = action.args.resource_id;
+  if (
+    typeof resourceId === "string" &&
+    resourceId &&
+    element.resourceId &&
+    (element.resourceId === resourceId ||
+      element.resourceId.includes(resourceId) ||
+      resourceId.includes(element.resourceId))
+  ) {
+    return true;
+  }
+  const text = action.args.text;
+  if (typeof text === "string" && text.trim()) {
+    const needle = text.trim().toLowerCase();
+    const candidates = [
+      element.text,
+      element.contentDescription,
+      element.resourceId,
+    ]
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    if (
+      candidates.some(
+        (candidate) =>
+          candidate === needle ||
+          candidate.includes(needle) ||
+          needle.includes(candidate),
+      )
+    ) {
+      return true;
+    }
+  }
+  const x = action.args.x;
+  const y = action.args.y;
+  return (
+    typeof x === "number" &&
+    typeof y === "number" &&
+    x >= element.bounds.left &&
+    x <= element.bounds.right &&
+    y >= element.bounds.top &&
+    y <= element.bounds.bottom
+  );
+}
+
+function buildPluginCoverage(plugin: AppKnowledgePlugin | null): PluginCoverage {
+  const pages = new Map<string, PageCoverage>();
+  if (!plugin) {
+    return { pages, actionable: 0, attempted: 0, verified: 0, coveragePercent: 0 };
+  }
+  const actionsByPage = new Map<string, ActionTrace[]>();
+  for (const action of plugin.actions) {
+    const actions = actionsByPage.get(action.fromPageId) || [];
+    actions.push(action);
+    actionsByPage.set(action.fromPageId, actions);
+  }
+  const transitionsByPage = new Map<string, PageTransition[]>();
+  for (const transition of plugin.transitions) {
+    const transitions = transitionsByPage.get(transition.fromPageId) || [];
+    transitions.push(transition);
+    transitionsByPage.set(transition.fromPageId, transitions);
+  }
+
+  let actionable = 0;
+  let attempted = 0;
+  let verified = 0;
+  for (const page of plugin.pages) {
+    const actions = actionsByPage.get(page.id) || [];
+    const transitions = transitionsByPage.get(page.id) || [];
+    const elements = page.elements.filter(isCoverageElement).map((element) => {
+      const matchingActions = actions.filter((action) =>
+        actionMatchesElement(action, page.id, element),
+      );
+      const matchingTransitions = transitions.filter(
+        (transition) => transition.triggerKey === element.key,
+      );
+      const successes = matchingActions.filter((action) => action.success).length;
+      return {
+        element,
+        attempts: matchingActions.length + matchingTransitions.length,
+        successes: successes + matchingTransitions.length,
+        transitions: matchingTransitions.length,
+      };
+    });
+    const pageAttempted = elements.filter((element) => element.attempts > 0).length;
+    const pageVerified = elements.filter((element) => element.successes > 0).length;
+    const coverage: PageCoverage = {
+      page,
+      elements,
+      actionable: elements.length,
+      attempted: pageAttempted,
+      verified: pageVerified,
+      coveragePercent: elements.length
+        ? Math.round((pageAttempted / elements.length) * 100)
+        : 0,
+      verifiedPercent: elements.length
+        ? Math.round((pageVerified / elements.length) * 100)
+        : 0,
+      uncovered: elements
+        .filter((element) => element.attempts === 0)
+        .map((element) => element.element),
+    };
+    pages.set(page.id, coverage);
+    actionable += coverage.actionable;
+    attempted += coverage.attempted;
+    verified += coverage.verified;
+  }
+  return {
+    pages,
+    actionable,
+    attempted,
+    verified,
+    coveragePercent: actionable ? Math.round((attempted / actionable) * 100) : 0,
+  };
+}
+
 export function KnowledgePanel({
   plugins,
   plugin,
@@ -182,6 +351,10 @@ export function KnowledgePanel({
         transition.toPageId === selectedPage?.id,
     ) || [];
   const tests = plugin?.testCases || [];
+  const coverage = useMemo(() => buildPluginCoverage(plugin), [plugin]);
+  const selectedCoverage = selectedPage
+    ? coverage.pages.get(selectedPage.id) || null
+    : null;
 
   useEffect(() => {
     setSelectedElement(null);
@@ -241,6 +414,9 @@ export function KnowledgePanel({
           </select>
         </div>
         <div className="knowledge-stats">
+          <span title="已尝试操作 / 可操作元素">
+            <ScanSearch size={13} /> {coverage.coveragePercent}% 覆盖
+          </span>
           <span>
             <GitBranch size={13} /> {plugin?.transitions.length || 0} 跳转
           </span>
@@ -405,6 +581,14 @@ export function KnowledgePanel({
                     <text className="graph-visits" x={x + NODE_WIDTH - 12} y={y + 20}>
                       ×{page.visitCount}
                     </text>
+                    <text
+                      className="graph-coverage"
+                      x={x + NODE_WIDTH - 12}
+                      y={y + 38}
+                      textAnchor="end"
+                    >
+                      {coverage.pages.get(page.id)?.coveragePercent || 0}%
+                    </text>
                   </g>
                 ))}
               </svg>
@@ -419,7 +603,10 @@ export function KnowledgePanel({
                     <span className="eyebrow">SCREEN ↔ COMPONENT</span>
                     <strong>{selectedPage.name}</strong>
                   </div>
-                  <span>{selectedPage.elements.length} elements</span>
+                  <span>
+                    {selectedCoverage?.attempted || 0}/{selectedCoverage?.actionable || 0}{" "}
+                    covered
+                  </span>
                 </div>
                 <div className="page-preview-and-elements">
                   <div
@@ -486,6 +673,46 @@ export function KnowledgePanel({
                         <small>{element.className.split(".").slice(-1)}</small>
                       </button>
                     ))}
+                  </div>
+                </div>
+                <div className="page-coverage">
+                  <div className="page-coverage-head">
+                    <div>
+                      <span className="eyebrow">ACTION COVERAGE</span>
+                      <strong>{selectedCoverage?.coveragePercent || 0}%</strong>
+                    </div>
+                    <span>
+                      已尝试 {selectedCoverage?.attempted || 0} · 已验证{" "}
+                      {selectedCoverage?.verified || 0} · 共{" "}
+                      {selectedCoverage?.actionable || 0}
+                    </span>
+                  </div>
+                  <div className="coverage-bar">
+                    <i
+                      style={{
+                        width: `${selectedCoverage?.coveragePercent || 0}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="uncovered-actions">
+                    <span>
+                      UNEXPLORED · {selectedCoverage?.uncovered.length || 0}
+                    </span>
+                    <div>
+                      {(selectedCoverage?.uncovered || []).slice(0, 12).map((element) => (
+                        <button
+                          type="button"
+                          key={element.key}
+                          onClick={() => setSelectedElement(element)}
+                          title={element.key}
+                        >
+                          {clip(coverageElementLabel(element), 14)}
+                        </button>
+                      ))}
+                      {(selectedCoverage?.uncovered.length || 0) === 0 ? (
+                        <small>当前页可操作元素均已尝试</small>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
                 {selectedElement && screenshotDataUrl ? (

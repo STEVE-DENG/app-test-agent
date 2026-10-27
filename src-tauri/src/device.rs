@@ -305,34 +305,50 @@ pub async fn start_app(serial: &str, package: &str) -> Result<String, String> {
     if package.trim().is_empty() {
         return Err("包名不能为空".to_string());
     }
-    let output = adb_text(vec![
-        "-s".into(),
-        serial.into(),
-        "shell".into(),
-        "monkey".into(),
-        "-p".into(),
-        package.to_string(),
-        "-c".into(),
-        "android.intent.category.LAUNCHER".into(),
-        "1".into(),
-    ])
-    .await?;
-    if output.contains("No activities found") {
-        return Err(format!("应用 {package} 没有可启动的 Launcher Activity"));
+    let component = resolve_launcher_component(serial, package).await?;
+    let mut last_foreground = String::new();
+    for attempt in 0..3 {
+        adb_text(vec![
+            "-s".into(),
+            serial.into(),
+            "shell".into(),
+            "am".into(),
+            "start".into(),
+            "-W".into(),
+            "-S".into(),
+            "-a".into(),
+            "android.intent.action.MAIN".into(),
+            "-c".into(),
+            "android.intent.category.LAUNCHER".into(),
+            "-n".into(),
+            component.clone(),
+        ])
+        .await?;
+        sleep(Duration::from_millis(1_600)).await;
+        if let Some(foreground) = foreground_component(serial).await? {
+            let foreground_package = foreground.split('/').next().unwrap_or_default();
+            let target_is_foreground = foreground_package == package;
+            last_foreground = foreground;
+            if target_is_foreground {
+                return Ok(format!("已启动 {package}（第 {} 次尝试）", attempt + 1));
+            }
+        }
+        // Some apps or their launch ads open a system settings page on top.
+        // Back out of that page before retrying instead of operating the wrong app.
+        press_key(serial, "back").await?;
+        sleep(Duration::from_millis(500)).await;
     }
-    Ok(format!("已请求启动 {package}"))
+    Err(format!(
+        "无法将 {package} 切到前台，当前前台为 {}",
+        if last_foreground.is_empty() {
+            "未知"
+        } else {
+            &last_foreground
+        }
+    ))
 }
 
-pub async fn restart_app_cleanly(serial: &str, package: &str) -> Result<String, String> {
-    adb_text(vec![
-        "-s".into(),
-        serial.into(),
-        "shell".into(),
-        "am".into(),
-        "force-stop".into(),
-        package.to_string(),
-    ])
-    .await?;
+async fn resolve_launcher_component(serial: &str, package: &str) -> Result<String, String> {
     let resolved = adb_text(vec![
         "-s".into(),
         serial.into(),
@@ -348,28 +364,28 @@ pub async fn restart_app_cleanly(serial: &str, package: &str) -> Result<String, 
         package.to_string(),
     ])
     .await?;
-    let component = resolved
+    resolved
         .lines()
         .map(str::trim)
         .filter(|line| line.contains('/'))
         .last()
-        .ok_or_else(|| format!("无法解析 {package} 的启动 Activity"))?;
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("应用 {package} 没有可启动的 Launcher Activity"))
+}
+
+pub async fn restart_app_cleanly(serial: &str, package: &str) -> Result<String, String> {
     adb_text(vec![
         "-s".into(),
         serial.into(),
         "shell".into(),
         "am".into(),
-        "start".into(),
-        "-n".into(),
-        component.to_string(),
-        "-a".into(),
-        "android.intent.action.MAIN".into(),
-        "-c".into(),
-        "android.intent.category.LAUNCHER".into(),
+        "force-stop".into(),
+        package.to_string(),
     ])
     .await?;
-    sleep(Duration::from_millis(2_400)).await;
-    Ok(format!("已冷启动 {package}"))
+    start_app(serial, package)
+        .await
+        .map(|message| format!("已冷启动：{message}"))
 }
 
 pub async fn list_packages(serial: &str) -> Result<Vec<String>, String> {

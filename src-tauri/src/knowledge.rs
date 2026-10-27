@@ -538,6 +538,15 @@ pub fn element_key(node: &UiNode) -> String {
 }
 
 fn find_trigger_element<'a>(nodes: &'a [UiNode], args: &Value) -> Option<&'a UiNode> {
+    if let Some(target_key) = args.get("elementKey").and_then(Value::as_str) {
+        if let Some(node) = nodes
+            .iter()
+            .filter(|node| node.is_actionable())
+            .find(|node| element_key(node) == target_key)
+        {
+            return Some(node);
+        }
+    }
     if let (Some(x), Some(y)) = (
         args.get("x").and_then(Value::as_i64),
         args.get("y").and_then(Value::as_i64),
