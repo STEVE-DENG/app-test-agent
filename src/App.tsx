@@ -31,6 +31,7 @@ import type {
   SaveSettingsInput,
   SettingsView,
   SkillRecord,
+  StepMetricRecord,
   ToolRecord,
   UiNode,
 } from "./types";
@@ -68,6 +69,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<DockTab>("timeline");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runSteps, setRunSteps] = useState<ToolRecord[]>([]);
+  const [runMetrics, setRunMetrics] = useState<StepMetricRecord[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
   const [loadingObservation, setLoadingObservation] = useState(false);
   const [stageError, setStageError] = useState("");
@@ -478,7 +480,12 @@ function App() {
   const handleSelectRun = async (id: string) => {
     setSelectedRunId(id);
     try {
-      setRunSteps(await api.listRunSteps(id));
+      const [steps, metrics] = await Promise.all([
+        api.listRunSteps(id),
+        api.listStepMetrics(id),
+      ]);
+      setRunSteps(steps);
+      setRunMetrics(metrics);
     } catch (error) {
       setNotice({ tone: "error", message: errorMessage(error) });
     }
@@ -870,6 +877,7 @@ function App() {
         skills={skills}
         runs={runs}
         runSteps={runSteps}
+        runMetrics={runMetrics}
         selectedRunId={selectedRunId}
         observation={observation}
         selectedNode={selectedNode}
@@ -888,6 +896,7 @@ function App() {
         onExportDebug={() => void handleExportDebug()}
         onSelectNode={setSelectedNode}
         onSelectRun={(id) => void handleSelectRun(id)}
+        onOpenDebug={() => setActiveTab("debug")}
         onSkillStatus={(id, status) => void handleSkillStatus(id, status)}
         onSelectPackage={(packageName) => void handleSelectPackage(packageName)}
         onSelectPage={setSelectedPageId}

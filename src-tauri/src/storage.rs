@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::models::{
-    EfficiencyStats, RunRecord, SkillHint, SkillPlanStep, SkillRecord, ToolRecord,
+    EfficiencyStats, RunRecord, SkillHint, SkillPlanStep, SkillRecord, StepMetricRecord, ToolRecord,
 };
 
 pub struct AppStore {
@@ -91,6 +91,16 @@ impl AppStore {
             )
             .map_err(|error| format!("初始化任务数据库失败: {error}"))?;
 
+        // CREATE TABLE IF NOT EXISTS does not add new columns to databases
+        // created by older releases. These migrations are intentionally idempotent.
+        for migration in [
+            "ALTER TABLE steps ADD COLUMN screenshot_after_path TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE steps ADD COLUMN page_id_before TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE steps ADD COLUMN page_id_after TEXT NOT NULL DEFAULT ''",
+        ] {
+            let _ = connection.execute(migration, []);
+        }
+
         Ok(Self {
             connection: Mutex::new(connection),
             data_dir,
@@ -127,8 +137,9 @@ impl AppStore {
             .execute(
                 "INSERT INTO steps (
                     run_id, step_index, thought, tool, args_json, result_json,
-                    page_signature_before, page_signature_after, screenshot_path, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    page_signature_before, page_signature_after, screenshot_path,
+                    screenshot_after_path, page_id_before, page_id_after, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     run_id,
                     record.step_index,
@@ -139,6 +150,9 @@ impl AppStore {
                     record.page_signature_before,
                     record.page_signature_after,
                     record.screenshot_path,
+                    record.screenshot_after_path,
+                    record.page_id_before,
+                    record.page_id_after,
                     record.created_at
                 ],
             )
@@ -249,7 +263,8 @@ impl AppStore {
         let mut statement = connection
             .prepare(
                 "SELECT step_index, thought, tool, args_json, result_json,
-                        page_signature_before, page_signature_after, screenshot_path, created_at
+                        page_signature_before, page_signature_after, screenshot_path,
+                        screenshot_after_path, page_id_before, page_id_after, created_at
                  FROM steps
                  WHERE run_id = ?1
                  ORDER BY step_index ASC",
@@ -270,13 +285,45 @@ impl AppStore {
                     page_signature_before: row.get(5)?,
                     page_signature_after: row.get(6)?,
                     screenshot_path: row.get(7)?,
-                    created_at: row.get(8)?,
+                    screenshot_after_path: row.get(8)?,
+                    page_id_before: row.get(9)?,
+                    page_id_after: row.get(10)?,
+                    created_at: row.get(11)?,
                 })
             })
             .map_err(|error| format!("查询步骤失败: {error}"))?;
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("读取步骤失败: {error}"))
+    }
+
+    pub fn list_step_metrics(&self, run_id: &str) -> Result<Vec<StepMetricRecord>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT run_id, step_index, model_ms, tool_ms, observation_ms,
+                        knowledge_ms, total_ms, created_at
+                 FROM step_metrics
+                 WHERE run_id = ?1
+                 ORDER BY step_index ASC",
+            )
+            .map_err(|error| format!("准备步骤耗时查询失败: {error}"))?;
+        let rows = statement
+            .query_map(params![run_id], |row| {
+                Ok(StepMetricRecord {
+                    run_id: row.get(0)?,
+                    step_index: row.get::<_, i64>(1)? as u32,
+                    model_ms: row.get::<_, i64>(2)? as u64,
+                    tool_ms: row.get::<_, i64>(3)? as u64,
+                    observation_ms: row.get::<_, i64>(4)? as u64,
+                    knowledge_ms: row.get::<_, i64>(5)? as u64,
+                    total_ms: row.get::<_, i64>(6)? as u64,
+                    created_at: row.get(7)?,
+                })
+            })
+            .map_err(|error| format!("查询步骤耗时失败: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取步骤耗时失败: {error}"))
     }
 
     pub fn create_skill_candidate(
@@ -756,6 +803,9 @@ mod tests {
                 page_signature_before: "before".to_string(),
                 page_signature_after: "after".to_string(),
                 screenshot_path: String::new(),
+                screenshot_after_path: String::new(),
+                page_id_before: String::new(),
+                page_id_after: String::new(),
                 created_at: Utc::now().to_rfc3339(),
             },
             ToolRecord {
@@ -767,6 +817,9 @@ mod tests {
                 page_signature_before: "after".to_string(),
                 page_signature_after: "results".to_string(),
                 screenshot_path: String::new(),
+                screenshot_after_path: String::new(),
+                page_id_before: String::new(),
+                page_id_after: String::new(),
                 created_at: Utc::now().to_rfc3339(),
             },
         ];

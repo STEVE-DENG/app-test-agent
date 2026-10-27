@@ -20,7 +20,7 @@ use models::{
     AgentRunResult, AppKnowledgePlugin, AppPluginSummary, AppTestCase, ArtifactInfo, DebugSnapshot,
     DebugSnapshotInput, DeviceInfo, EfficiencyStats, LearningLoopInput, Observation, RunRecord,
     SaveSettingsInput, SettingsView, SkillRecord, StartExplorationInput, StartTaskInput,
-    StoredSettings, ToolRecord,
+    StepMetricRecord, StoredSettings, ToolRecord,
 };
 use storage::AppStore;
 use tauri::{Manager, State};
@@ -347,6 +347,14 @@ fn list_runs(state: State<'_, AppState>, limit: Option<u32>) -> Result<Vec<RunRe
 #[tauri::command]
 fn list_run_steps(state: State<'_, AppState>, run_id: String) -> Result<Vec<ToolRecord>, String> {
     state.store.list_run_steps(&run_id)
+}
+
+#[tauri::command]
+fn list_step_metrics(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Vec<StepMetricRecord>, String> {
+    state.store.list_step_metrics(&run_id)
 }
 
 #[tauri::command]
@@ -745,6 +753,7 @@ pub fn run() {
             cancel_task,
             list_runs,
             list_run_steps,
+            list_step_metrics,
             list_skills,
             set_skill_status,
             list_app_plugins,

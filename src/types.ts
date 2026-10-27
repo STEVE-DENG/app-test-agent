@@ -300,5 +300,19 @@ export type ToolRecord = {
   pageSignatureBefore: string;
   pageSignatureAfter: string;
   screenshotPath: string;
+  screenshotAfterPath: string;
+  pageIdBefore: string;
+  pageIdAfter: string;
+  createdAt: string;
+};
+
+export type StepMetricRecord = {
+  runId: string;
+  stepIndex: number;
+  modelMs: number;
+  toolMs: number;
+  observationMs: number;
+  knowledgeMs: number;
+  totalMs: number;
   createdAt: string;
 };

@@ -356,6 +356,9 @@ async fn execute_run(
                 page_signature_before: observation.page_signature.clone(),
                 page_signature_after: observation.page_signature.clone(),
                 screenshot_path: observation.screenshot_path.clone(),
+                screenshot_after_path: observation.screenshot_path.clone(),
+                page_id_before: observation.page_id.clone(),
+                page_id_after: observation.page_id.clone(),
                 created_at: Utc::now().to_rfc3339(),
             };
             deps.store.save_step_for_run(run_id, &finish_record)?;
@@ -434,6 +437,9 @@ async fn execute_run(
                 page_signature_before: observation.page_signature.clone(),
                 page_signature_after: observation.page_signature.clone(),
                 screenshot_path: observation.screenshot_path.clone(),
+                screenshot_after_path: observation.screenshot_path.clone(),
+                page_id_before: observation.page_id.clone(),
+                page_id_after: observation.page_id.clone(),
                 created_at: Utc::now().to_rfc3339(),
             };
             deps.store.save_step_for_run(run_id, &ask_record)?;
@@ -489,6 +495,9 @@ async fn execute_run(
                     page_signature_before: before_signature.clone(),
                     page_signature_after: before_signature.clone(),
                     screenshot_path: screenshot_path.clone(),
+                    screenshot_after_path: screenshot_path.clone(),
+                    page_id_before: observation.page_id.clone(),
+                    page_id_after: observation.page_id.clone(),
                     created_at: Utc::now().to_rfc3339(),
                 };
                 deps.store.save_step_for_run(run_id, &record)?;
@@ -567,6 +576,9 @@ async fn execute_run(
             page_signature_before: before_signature,
             page_signature_after: after_observation.page_signature.clone(),
             screenshot_path,
+            screenshot_after_path: after_observation.screenshot_path.clone(),
+            page_id_before: observation.page_id.clone(),
+            page_id_after: after_observation.page_id.clone(),
             created_at: Utc::now().to_rfc3339(),
         };
         deps.store.save_step_for_run(run_id, &record)?;

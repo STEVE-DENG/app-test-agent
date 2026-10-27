@@ -11,6 +11,7 @@ import type {
   SaveSettingsInput,
   SettingsView,
   SkillRecord,
+  StepMetricRecord,
   ToolRecord,
 } from "../types";
 
@@ -56,6 +57,8 @@ const tauriApi = {
   listRuns: (limit = 30) => invoke<RunRecord[]>("list_runs", { limit }),
   listRunSteps: (runId: string) =>
     invoke<ToolRecord[]>("list_run_steps", { runId }),
+  listStepMetrics: (runId: string) =>
+    invoke<StepMetricRecord[]>("list_step_metrics", { runId }),
   listSkills: () => invoke<SkillRecord[]>("list_skills"),
   setSkillStatus: (skillId: string, status: string) =>
     invoke<void>("set_skill_status", { skillId, status }),
@@ -126,6 +129,7 @@ const browserPreviewApi: typeof tauriApi = {
   cancelTask: () => Promise.resolve(false),
   listRuns: () => Promise.resolve([]),
   listRunSteps: () => Promise.resolve([]),
+  listStepMetrics: () => Promise.resolve([]),
   listSkills: () => Promise.resolve([]),
   setSkillStatus: () => previewOnly("审核 Skill"),
   listAppPlugins: () => Promise.resolve([]),

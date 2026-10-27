@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { DebugPanel } from "./DebugPanel";
 import { KnowledgePanel } from "./KnowledgePanel";
+import { RunTracePanel } from "./RunTracePanel";
 import type {
   AgentEvent,
   AppKnowledgePlugin,
@@ -22,6 +23,7 @@ import type {
   Observation,
   RunRecord,
   SkillRecord,
+  StepMetricRecord,
   ToolRecord,
   UiNode,
 } from "../types";
@@ -48,6 +50,7 @@ type Props = {
   skills: SkillRecord[];
   runs: RunRecord[];
   runSteps: ToolRecord[];
+  runMetrics: StepMetricRecord[];
   selectedRunId: string | null;
   observation: Observation | null;
   selectedNode: UiNode | null;
@@ -68,6 +71,7 @@ type Props = {
   onExportDebug: () => void;
   onSelectNode: (node: UiNode) => void;
   onSelectRun: (runId: string) => void;
+  onOpenDebug: () => void;
   onSkillStatus: (skillId: string, status: string) => void;
   onSelectPackage: (packageName: string) => void;
   onSelectPage: (pageId: string) => void;
@@ -120,6 +124,7 @@ export function BottomDock({
   skills,
   runs,
   runSteps,
+  runMetrics,
   selectedRunId,
   observation,
   selectedNode,
@@ -136,6 +141,7 @@ export function BottomDock({
   onExportDebug,
   onSelectNode,
   onSelectRun,
+  onOpenDebug,
   onSkillStatus,
   onSelectPackage,
   onSelectPage,
@@ -336,29 +342,13 @@ export function BottomDock({
             </div>
             <div className="run-detail">
               {selectedRun ? (
-                <>
-                  <div className="run-detail-head">
-                    <div>
-                      <span className="eyebrow">RUN {selectedRun.id.slice(0, 8)}</span>
-                      <h3>{selectedRun.instruction}</h3>
-                    </div>
-                    <span>{selectedRun.model}</span>
-                  </div>
-                  <p className="run-summary">{selectedRun.summary || "没有结果摘要"}</p>
-                  <div className="run-step-list">
-                    {runSteps.length === 0 ? (
-                      <span className="run-detail-empty">没有保存的步骤</span>
-                    ) : (
-                      runSteps.map((step) => (
-                        <div key={`${step.stepIndex}-${step.tool}`}>
-                          <span>{step.stepIndex}</span>
-                          <strong>{step.tool}</strong>
-                          <code>{JSON.stringify(step.args)}</code>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </>
+                <RunTracePanel
+                  key={selectedRun.id}
+                  run={selectedRun}
+                  steps={runSteps}
+                  metrics={runMetrics}
+                  onOpenDebug={onOpenDebug}
+                />
               ) : (
                 <div className="dock-empty compact-empty">
                   <ScanSearch size={20} />

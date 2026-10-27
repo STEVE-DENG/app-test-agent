@@ -431,6 +431,25 @@ pub struct ToolRecord {
     pub page_signature_before: String,
     pub page_signature_after: String,
     pub screenshot_path: String,
+    #[serde(default)]
+    pub screenshot_after_path: String,
+    #[serde(default)]
+    pub page_id_before: String,
+    #[serde(default)]
+    pub page_id_after: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepMetricRecord {
+    pub run_id: String,
+    pub step_index: u32,
+    pub model_ms: u64,
+    pub tool_ms: u64,
+    pub observation_ms: u64,
+    pub knowledge_ms: u64,
+    pub total_ms: u64,
     pub created_at: String,
 }
 
