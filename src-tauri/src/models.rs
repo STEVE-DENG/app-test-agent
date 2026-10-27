@@ -15,6 +15,25 @@ pub struct DeviceInfo {
     pub ready: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDiagnostics {
+    pub serial: String,
+    pub adb_version: String,
+    pub model: String,
+    pub manufacturer: String,
+    pub android_version: String,
+    pub sdk: String,
+    pub resolution: String,
+    pub density: String,
+    pub screen_state: String,
+    pub battery_level: Option<i32>,
+    pub battery_status: String,
+    pub current_activity: String,
+    pub input_method: String,
+    pub boot_completed: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Bounds {
@@ -254,6 +273,7 @@ pub struct DebugSnapshot {
     pub scrollable_node_count: usize,
     pub artifacts_dir: String,
     pub data_dir: String,
+    pub diagnostics: DeviceDiagnostics,
     pub artifacts: Vec<ArtifactInfo>,
     pub efficiency: EfficiencyStats,
 }
@@ -459,6 +479,8 @@ pub struct ModelTraceRecord {
     pub run_id: String,
     pub step_index: u32,
     pub model: String,
+    pub prompt_text: String,
+    pub endpoint: String,
     pub prompt_chars: usize,
     pub system_chars: usize,
     pub node_count: usize,

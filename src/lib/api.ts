@@ -43,6 +43,8 @@ const tauriApi = {
     invoke<string[]>("list_packages", { deviceSerial }),
   openMirror: (deviceSerial: string) =>
     invoke<string>("open_mirror", { deviceSerial }),
+  readLogcatTail: (deviceSerial: string, lines = 300) =>
+    invoke<string>("read_logcat_tail", { deviceSerial, lines }),
   getSettings: () => invoke<SettingsView>("get_settings"),
   saveSettings: (input: SaveSettingsInput) =>
     invoke<SettingsView>("save_app_settings", { input }),
@@ -72,6 +74,8 @@ const tauriApi = {
     invoke<string>("export_app_plugin", { package: packageName }),
   importAppPlugin: (json: string) =>
     invoke<AppPluginSummary>("import_app_plugin", { json }),
+  compactAppPlugin: (packageName: string) =>
+    invoke<AppPluginSummary>("compact_app_plugin", { package: packageName }),
   generateAppTests: (packageName: string) =>
     invoke<AppTestCase[]>("generate_app_tests", { package: packageName }),
   readArtifact: (path: string) =>
@@ -110,6 +114,7 @@ const browserPreviewApi: typeof tauriApi = {
   captureObservation: () => previewOnly("采集设备画面"),
   listPackages: () => previewOnly("读取应用列表"),
   openMirror: () => previewOnly("打开设备镜像"),
+  readLogcatTail: () => previewOnly("读取 Logcat"),
   getSettings: () => Promise.resolve(previewSettings),
   saveSettings: (input) => {
     previewSettings = {
@@ -140,6 +145,7 @@ const browserPreviewApi: typeof tauriApi = {
   getAppPlugin: () => previewOnly("读取 App 插件"),
   exportAppPlugin: () => previewOnly("导出 App 插件"),
   importAppPlugin: () => previewOnly("导入 App 插件"),
+  compactAppPlugin: () => previewOnly("合并重复页面"),
   generateAppTests: () => previewOnly("生成测试用例"),
   readArtifact: () => previewOnly("读取页面截图"),
   readTextArtifact: () => previewOnly("读取调试文本"),

@@ -10,6 +10,23 @@ export type DeviceInfo = {
   ready: boolean;
 };
 
+export type DeviceDiagnostics = {
+  serial: string;
+  adbVersion: string;
+  model: string;
+  manufacturer: string;
+  androidVersion: string;
+  sdk: string;
+  resolution: string;
+  density: string;
+  screenState: string;
+  batteryLevel: number | null;
+  batteryStatus: string;
+  currentActivity: string;
+  inputMethod: string;
+  bootCompleted: string;
+};
+
 export type Bounds = {
   left: number;
   top: number;
@@ -197,6 +214,7 @@ export type DebugSnapshot = {
   scrollableNodeCount: number;
   artifactsDir: string;
   dataDir: string;
+  diagnostics: DeviceDiagnostics;
   artifacts: ArtifactInfo[];
   efficiency: EfficiencyStats;
 };
@@ -321,6 +339,8 @@ export type ModelTraceRecord = {
   runId: string;
   stepIndex: number;
   model: string;
+  promptText: string;
+  endpoint: string;
   promptChars: number;
   systemChars: number;
   nodeCount: number;

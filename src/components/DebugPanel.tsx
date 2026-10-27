@@ -88,6 +88,9 @@ export function DebugPanel({
   const [selectedArtifact, setSelectedArtifact] = useState("");
   const [artifactContent, setArtifactContent] = useState("");
   const [artifactError, setArtifactError] = useState("");
+  const [logcat, setLogcat] = useState("");
+  const [logcatLoading, setLogcatLoading] = useState(false);
+  const [logcatError, setLogcatError] = useState("");
   const [copied, setCopied] = useState(false);
   const [copiedKind, setCopiedKind] = useState("");
 
@@ -131,6 +134,19 @@ export function DebugPanel({
       );
     } catch (nextError) {
       setArtifactError(errorMessage(nextError));
+    }
+  };
+
+  const loadLogcat = async () => {
+    if (!device?.ready) return;
+    setLogcatLoading(true);
+    setLogcatError("");
+    try {
+      setLogcat(await api.readLogcatTail(device.serial, 400));
+    } catch (nextError) {
+      setLogcatError(errorMessage(nextError));
+    } finally {
+      setLogcatLoading(false);
     }
   };
 
@@ -181,9 +197,28 @@ export function DebugPanel({
             <Copy size={14} />
             {copied && copiedKind === "节点" ? "已复制" : "复制节点 JSON"}
           </button>
+          <button
+            type="button"
+            onClick={() =>
+              snapshot &&
+              void copyValue(JSON.stringify(snapshot.diagnostics, null, 2), "诊断")
+            }
+            disabled={!snapshot}
+          >
+            <Copy size={14} />
+            {copied && copiedKind === "诊断" ? "已复制" : "复制设备诊断"}
+          </button>
           <button type="button" onClick={onExport} disabled={!device?.ready}>
             <Download size={14} />
             导出调试包
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadLogcat()}
+            disabled={!device?.ready || logcatLoading}
+          >
+            <TerminalSquare size={14} />
+            {logcatLoading ? "读取中..." : "读取 Logcat"}
           </button>
         </div>
       </div>
@@ -357,6 +392,43 @@ export function DebugPanel({
                   </code>
                 </div>
               </div>
+              <div className="diagnostics-grid">
+                <div>
+                  <span>设备</span>
+                  <strong>
+                    {snapshot.diagnostics.manufacturer} {snapshot.diagnostics.model}
+                  </strong>
+                </div>
+                <div>
+                  <span>系统</span>
+                  <strong>
+                    Android {snapshot.diagnostics.androidVersion} · SDK{" "}
+                    {snapshot.diagnostics.sdk}
+                  </strong>
+                </div>
+                <div>
+                  <span>屏幕</span>
+                  <strong>
+                    {snapshot.diagnostics.resolution} · {snapshot.diagnostics.density}
+                  </strong>
+                </div>
+                <div>
+                  <span>电源</span>
+                  <strong>
+                    {snapshot.diagnostics.batteryLevel ?? "?"}% ·{" "}
+                    {snapshot.diagnostics.batteryStatus} ·{" "}
+                    {snapshot.diagnostics.screenState || "unknown"}
+                  </strong>
+                </div>
+                <div>
+                  <span>输入法</span>
+                  <strong>{snapshot.diagnostics.inputMethod || "未知"}</strong>
+                </div>
+                <div>
+                  <span>ADB</span>
+                  <strong>{snapshot.diagnostics.adbVersion || "未知"}</strong>
+                </div>
+              </div>
               <div className="snapshot-body">
                 <img src={snapshot.screenshotDataUrl} alt="debug snapshot" />
                 <div className="snapshot-facts">
@@ -381,6 +453,18 @@ export function DebugPanel({
               </div>
               {showRawXml ? (
                 <pre className="raw-xml">{snapshot.rawUiXml || "没有保存 UI XML"}</pre>
+              ) : null}
+              {logcatError ? <div className="debug-error">{logcatError}</div> : null}
+              {logcat ? (
+                <div className="logcat-view">
+                  <div>
+                    <span>LOGCAT · LAST 400 LINES</span>
+                    <button type="button" onClick={() => setLogcat("")}>
+                      清空
+                    </button>
+                  </div>
+                  <pre>{logcat}</pre>
+                </div>
               ) : null}
             </>
           ) : (

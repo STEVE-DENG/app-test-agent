@@ -662,6 +662,20 @@ function App() {
     }
   };
 
+  const handleCompactPlugin = async () => {
+    if (!selectedPackage) return;
+    try {
+      const summary = await api.compactAppPlugin(selectedPackage);
+      await refreshAppPlugins(selectedPackage);
+      setNotice({
+        tone: "success",
+        message: `页面关系已压缩：${summary.pages} 个页面，${summary.transitions} 条跳转`,
+      });
+    } catch (error) {
+      setKnowledgeError(errorMessage(error));
+    }
+  };
+
   const handleRunTest = async (testId: string) => {
     if (!selectedDevice?.ready) {
       setKnowledgeError("请先连接并选择一台 Android 设备");
@@ -915,6 +929,7 @@ function App() {
         onStartExploration={(maxSteps) => void handleStartExploration(maxSteps)}
         onStopExploration={() => void handleStopExploration()}
         onGenerateTests={() => void handleGenerateTests()}
+        onCompactPlugin={() => void handleCompactPlugin()}
         onRunTest={(testId) => void handleRunTest(testId)}
         onExportPlugin={() => void handleExportPlugin()}
         onImportPlugin={(file) => void handleImportPlugin(file)}

@@ -3088,6 +3088,11 @@ code {
   cursor: pointer;
 }
 
+.model-trace-actions {
+  display: inline-flex;
+  gap: 3px;
+}
+
 .model-trace-facts {
   display: flex;
   flex-wrap: wrap;
@@ -3109,6 +3114,16 @@ code {
   margin-top: 4px;
   overflow: hidden;
   color: var(--ink-mute);
+  font-size: 5.8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-endpoint {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--teal);
   font-size: 5.8px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3909,6 +3924,40 @@ code {
   white-space: nowrap;
 }
 
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin-bottom: 7px;
+}
+
+.diagnostics-grid > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 6px;
+  background: rgba(12, 109, 100, 0.035);
+  border: 1px solid rgba(12, 109, 100, 0.1);
+  border-radius: 5px;
+}
+
+.diagnostics-grid span {
+  color: var(--ink-mute);
+  font-size: 6.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.diagnostics-grid strong {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 7px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .snapshot-body {
   display: grid;
   grid-template-columns: minmax(95px, 0.68fr) minmax(0, 1fr);
@@ -3956,6 +4005,47 @@ code {
   font-size: 6.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.logcat-view {
+  margin-top: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.logcat-view > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+  color: var(--ink-mute);
+  background: rgba(255, 253, 247, 0.72);
+  font-family: "SFMono-Regular", monospace;
+  font-size: 6px;
+}
+
+.logcat-view button {
+  padding: 2px 5px;
+  color: var(--ink-mute);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 6px;
+  cursor: pointer;
+}
+
+.logcat-view pre {
+  max-height: 150px;
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+  color: #dbe9dc;
+  background: #202a25;
+  font-size: 5.7px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .raw-xml,

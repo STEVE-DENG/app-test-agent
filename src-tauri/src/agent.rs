@@ -46,6 +46,9 @@ const ALLOWED_TOOLS: &[&str] = &[
     "finish",
 ];
 
+const MODEL_NODE_LIMIT: usize = 56;
+const HISTORY_LIMIT: usize = 6;
+
 const CONNECTION_TEST_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 pub struct AgentDeps {
@@ -210,7 +213,7 @@ async fn execute_run(
     )
     .await?;
     let _initial_observation_ms = observation_started.elapsed().as_millis() as u64;
-    if let Err(error) = deps.knowledge.register_observation(&observation) {
+    if let Err(error) = deps.knowledge.register_observation_mut(&mut observation) {
         emit(
             deps.app.as_ref(),
             run_id,
@@ -250,8 +253,133 @@ async fn execute_run(
     let mut records = Vec::<ToolRecord>::new();
     let mut history = Vec::<String>::new();
     let mut last_error: Option<String> = None;
+    let mut next_step_index = 1_u32;
 
-    for step_index in 1..=deps.settings.max_steps {
+    if let Some(skill) = skills.first() {
+        let plan = skill.plan.iter().take(8).collect::<Vec<_>>();
+        if !plan.is_empty() {
+            emit(
+                deps.app.as_ref(),
+                run_id,
+                "skill_fast_path",
+                "优先回放已验证 Skill",
+                &format!("{} · {} steps", skill.name, plan.len()),
+                next_step_index - 1,
+                Some(json!({ "skillId": skill.id, "steps": plan.len() })),
+            );
+            for step in plan {
+                if deps.cancellation.load(Ordering::Relaxed) {
+                    break;
+                }
+                let step_index = next_step_index;
+                let decision = ModelDecision {
+                    thought: format!("复用已验证 Skill：{}", step.note),
+                    action: step.tool.clone(),
+                    args: step.args.clone(),
+                    summary: None,
+                };
+                let before = observation.clone();
+                let tool_started = Instant::now();
+                let result = match execute_tool(device_serial, &decision, &before).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let tool_ms = tool_started.elapsed().as_millis() as u64;
+                        let record = ToolRecord {
+                            step_index,
+                            thought: decision.thought.clone(),
+                            tool: decision.action.clone(),
+                            args: decision.args.clone(),
+                            result: json!({ "error": error.clone() }),
+                            page_signature_before: before.page_signature.clone(),
+                            page_signature_after: before.page_signature.clone(),
+                            screenshot_path: before.screenshot_path.clone(),
+                            screenshot_after_path: before.screenshot_path.clone(),
+                            page_id_before: before.page_id.clone(),
+                            page_id_after: before.page_id.clone(),
+                            created_at: Utc::now().to_rfc3339(),
+                        };
+                        deps.store.save_step_for_run(run_id, &record)?;
+                        deps.store
+                            .save_step_metric(run_id, step_index, 0, tool_ms, 0, 0, tool_ms)?;
+                        records.push(record);
+                        history.push(format!(
+                            "#{step_index} skill {} {} -> ERROR: {}",
+                            decision.action, decision.args, error
+                        ));
+                        last_error = Some(format!("Skill 回放失败，改用模型恢复：{error}"));
+                        emit(
+                            deps.app.as_ref(),
+                            run_id,
+                            "skill_fast_path_failed",
+                            "Skill 回放失败",
+                            &error,
+                            step_index,
+                            Some(json!({ "skillId": skill.id, "tool": decision.action })),
+                        );
+                        next_step_index = step_index + 1;
+                        break;
+                    }
+                };
+                let tool_ms = tool_started.elapsed().as_millis() as u64;
+                let observation_started = Instant::now();
+                let mut after = device::capture_observation(
+                    device_serial,
+                    &deps.artifacts_dir,
+                    run_id,
+                    &format!("skill-{step_index:02}-after"),
+                )
+                .await
+                .unwrap_or_else(|_| before.clone());
+                let _ = deps.knowledge.register_observation_mut(&mut after);
+                let observation_ms = observation_started.elapsed().as_millis() as u64;
+                let knowledge_started = Instant::now();
+                let _ = deps.knowledge.record_action(
+                    run_id,
+                    step_index,
+                    &before,
+                    &after,
+                    &decision.action,
+                    &decision.args,
+                    &result,
+                    true,
+                );
+                let knowledge_ms = knowledge_started.elapsed().as_millis() as u64;
+                let record = ToolRecord {
+                    step_index,
+                    thought: decision.thought.clone(),
+                    tool: decision.action.clone(),
+                    args: decision.args.clone(),
+                    result: result.clone(),
+                    page_signature_before: before.page_signature.clone(),
+                    page_signature_after: after.page_signature.clone(),
+                    screenshot_path: before.screenshot_path.clone(),
+                    screenshot_after_path: after.screenshot_path.clone(),
+                    page_id_before: before.page_id.clone(),
+                    page_id_after: after.page_id.clone(),
+                    created_at: Utc::now().to_rfc3339(),
+                };
+                deps.store.save_step_for_run(run_id, &record)?;
+                deps.store.save_step_metric(
+                    run_id,
+                    step_index,
+                    0,
+                    tool_ms,
+                    observation_ms,
+                    knowledge_ms,
+                    tool_ms + observation_ms + knowledge_ms,
+                )?;
+                records.push(record);
+                history.push(format!(
+                    "#{step_index} skill {} {} -> {}",
+                    decision.action, decision.args, result
+                ));
+                next_step_index = step_index + 1;
+                observation = after;
+            }
+        }
+    }
+
+    for step_index in next_step_index..=deps.settings.max_steps {
         let step_started = Instant::now();
         if deps.cancellation.load(Ordering::Relaxed) {
             let summary = "任务已由用户停止";
@@ -563,7 +691,7 @@ async fn execute_run(
         let tool_ms = tool_started.elapsed().as_millis() as u64;
 
         let observation_started = Instant::now();
-        let after_observation = device::capture_observation(
+        let mut after_observation = device::capture_observation(
             device_serial,
             &deps.artifacts_dir,
             run_id,
@@ -571,6 +699,20 @@ async fn execute_run(
         )
         .await
         .unwrap_or_else(|_| observation.clone());
+        if let Err(error) = deps
+            .knowledge
+            .register_observation_mut(&mut after_observation)
+        {
+            emit(
+                deps.app.as_ref(),
+                run_id,
+                "knowledge_warning",
+                "页面知识写入失败",
+                &error,
+                step_index,
+                None,
+            );
+        }
         let observation_ms = observation_started.elapsed().as_millis() as u64;
         let knowledge_started = Instant::now();
         if let Err(error) = deps.knowledge.record_action(
@@ -687,30 +829,64 @@ async fn execute_tool(
         }
         "tap_text" => {
             let text = required_str(args, "text")?;
-            let nodes = device::dump_ui_nodes(serial).await?;
-            let node = device::find_node_by_text(&nodes, text)
-                .ok_or_else(|| format!("当前页面找不到可点击文本: {text}"))?;
-            let (x, y) = node.bounds.center();
+            let (x, y, matched_text, resource_id, bounds) =
+                if let Some(node) = device::find_node_by_text(&observation.nodes, text) {
+                    (
+                        node.bounds.center().0,
+                        node.bounds.center().1,
+                        node.text.clone(),
+                        node.resource_id.clone(),
+                        node.bounds,
+                    )
+                } else {
+                    let nodes = device::dump_ui_nodes(serial).await?;
+                    let node = device::find_node_by_text(&nodes, text)
+                        .ok_or_else(|| format!("当前页面找不到可点击文本: {text}"))?;
+                    (
+                        node.bounds.center().0,
+                        node.bounds.center().1,
+                        node.text.clone(),
+                        node.resource_id.clone(),
+                        node.bounds,
+                    )
+                };
             let message = device::tap(serial, x, y).await?;
             Ok(json!({
                 "message": message,
-                "matchedText": node.text,
-                "resourceId": node.resource_id,
-                "bounds": node.bounds
+                "matchedText": matched_text,
+                "resourceId": resource_id,
+                "bounds": bounds
             }))
         }
         "tap_id" => {
             let resource_id = required_str(args, "resource_id")?;
-            let nodes = device::dump_ui_nodes(serial).await?;
-            let node = device::find_node_by_id(&nodes, resource_id)
-                .ok_or_else(|| format!("当前页面找不到元素 ID: {resource_id}"))?;
-            let (x, y) = node.bounds.center();
+            let (x, y, matched_text, matched_id, bounds) =
+                if let Some(node) = device::find_node_by_id(&observation.nodes, resource_id) {
+                    (
+                        node.bounds.center().0,
+                        node.bounds.center().1,
+                        node.text.clone(),
+                        node.resource_id.clone(),
+                        node.bounds,
+                    )
+                } else {
+                    let nodes = device::dump_ui_nodes(serial).await?;
+                    let node = device::find_node_by_id(&nodes, resource_id)
+                        .ok_or_else(|| format!("当前页面找不到元素 ID: {resource_id}"))?;
+                    (
+                        node.bounds.center().0,
+                        node.bounds.center().1,
+                        node.text.clone(),
+                        node.resource_id.clone(),
+                        node.bounds,
+                    )
+                };
             let message = device::tap(serial, x, y).await?;
             Ok(json!({
                 "message": message,
-                "matchedText": node.text,
-                "resourceId": node.resource_id,
-                "bounds": node.bounds
+                "matchedText": matched_text,
+                "resourceId": matched_id,
+                "bounds": bounds
             }))
         }
         "long_press" => {
@@ -718,7 +894,7 @@ async fn execute_tool(
                 .get("duration_ms")
                 .and_then(Value::as_u64)
                 .unwrap_or(800);
-            let (x, y) = resolve_target(serial, args).await?;
+            let (x, y) = resolve_target(serial, args, &observation.nodes).await?;
             let message = device::long_press(serial, x, y, duration).await?;
             Ok(json!({ "message": message, "x": x, "y": y }))
         }
@@ -771,23 +947,36 @@ async fn execute_tool(
     }
 }
 
-async fn resolve_target(serial: &str, args: &Value) -> Result<(i32, i32), String> {
+async fn resolve_target(
+    serial: &str,
+    args: &Value,
+    observation_nodes: &[UiNode],
+) -> Result<(i32, i32), String> {
     if let (Some(x), Some(y)) = (
         args.get("x").and_then(Value::as_i64),
         args.get("y").and_then(Value::as_i64),
     ) {
         return Ok((x as i32, y as i32));
     }
-    let nodes = device::dump_ui_nodes(serial).await?;
-    let node = if let Some(text) = args.get("text").and_then(Value::as_str) {
-        device::find_node_by_text(&nodes, text)
-    } else if let Some(resource_id) = args.get("resource_id").and_then(Value::as_str) {
-        device::find_node_by_id(&nodes, resource_id)
+    let bounds = if let Some(node) = find_target_node(observation_nodes, args) {
+        node.bounds
     } else {
-        None
+        let nodes = device::dump_ui_nodes(serial).await?;
+        find_target_node(&nodes, args)
+            .ok_or_else(|| "长按目标既没有坐标，也无法通过文本或 ID 定位".to_string())?
+            .bounds
+    };
+    Ok(bounds.center())
+}
+
+fn find_target_node<'a>(nodes: &'a [UiNode], args: &Value) -> Option<&'a UiNode> {
+    if let Some(text) = args.get("text").and_then(Value::as_str) {
+        device::find_node_by_text(nodes, text)
+    } else {
+        args.get("resource_id")
+            .and_then(Value::as_str)
+            .and_then(|resource_id| device::find_node_by_id(nodes, resource_id))
     }
-    .ok_or_else(|| "长按目标既没有坐标，也无法通过文本或 ID 定位".to_string())?;
-    Ok(node.bounds.center())
 }
 
 async fn ask_model(
@@ -815,7 +1004,7 @@ async fn ask_model(
         last_error,
     );
     let prompt_chars = user_prompt.chars().count();
-    let node_count = compact_nodes(&observation.nodes, 72).len();
+    let node_count = compact_nodes(&observation.nodes, MODEL_NODE_LIMIT).len();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
@@ -889,6 +1078,8 @@ async fn ask_model(
                         run_id: run_id.to_string(),
                         step_index,
                         model: settings.model.clone(),
+                        prompt_text: user_prompt.clone(),
+                        endpoint: endpoint.clone(),
                         prompt_chars,
                         system_chars: system_prompt.chars().count(),
                         node_count,
@@ -957,11 +1148,11 @@ fn user_prompt(
     skills: &[SkillHint],
     last_error: Option<&str>,
 ) -> String {
-    let nodes = compact_nodes(&observation.nodes, 72);
+    let nodes = compact_nodes(&observation.nodes, MODEL_NODE_LIMIT);
     let recent_history = history
         .iter()
         .rev()
-        .take(8)
+        .take(HISTORY_LIMIT)
         .cloned()
         .collect::<Vec<_>>()
         .into_iter()

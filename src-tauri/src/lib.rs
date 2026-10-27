@@ -155,9 +155,10 @@ pub async fn run_headless_debug(
     let knowledge = KnowledgeStore::new(&data_dir)?;
     device::ensure_device_ready(&device_serial).await?;
     let label = format!("headless-debug-{}", Utc::now().format("%Y%m%d-%H%M%S"));
-    let observation =
+    let mut observation =
         device::capture_observation(&device_serial, &artifacts_dir, "_debug", &label).await?;
-    knowledge.register_observation(&observation)?;
+    let diagnostics = device::device_diagnostics(&device_serial).await?;
+    knowledge.register_observation_mut(&mut observation)?;
     let raw_ui_xml = std::fs::read_to_string(&observation.ui_path).unwrap_or_default();
     let package = package
         .filter(|value| !value.trim().is_empty())
@@ -196,9 +197,18 @@ pub async fn run_headless_debug(
             .count(),
         artifacts_dir: artifacts_dir.to_string_lossy().to_string(),
         data_dir: store.data_dir.to_string_lossy().to_string(),
+        diagnostics,
         artifacts: collect_artifact_infos(&artifacts_dir, 80),
         efficiency,
     })
+}
+
+pub fn run_headless_compact(
+    data_dir: PathBuf,
+    package: String,
+) -> Result<AppPluginSummary, String> {
+    let knowledge = KnowledgeStore::new(&data_dir)?;
+    knowledge.compact_plugin(&package)
 }
 
 #[tauri::command]
@@ -212,10 +222,10 @@ async fn capture_observation(
     device_serial: String,
 ) -> Result<Observation, String> {
     let label = format!("preview-{}", Utc::now().format("%Y%m%d-%H%M%S"));
-    let observation =
+    let mut observation =
         device::capture_observation(&device_serial, &state.artifacts_dir, "_preview", &label)
             .await?;
-    state.knowledge.register_observation(&observation)?;
+    state.knowledge.register_observation_mut(&mut observation)?;
     Ok(observation)
 }
 
@@ -227,6 +237,11 @@ async fn list_packages(device_serial: String) -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn open_mirror(device_serial: String) -> Result<String, String> {
     device::launch_scrcpy(&device_serial).await
+}
+
+#[tauri::command]
+async fn read_logcat_tail(device_serial: String, lines: Option<u32>) -> Result<String, String> {
+    device::logcat_tail(&device_serial, lines.unwrap_or(300)).await
 }
 
 #[tauri::command]
@@ -403,6 +418,14 @@ fn import_app_plugin(state: State<'_, AppState>, json: String) -> Result<AppPlug
 }
 
 #[tauri::command]
+fn compact_app_plugin(
+    state: State<'_, AppState>,
+    package: String,
+) -> Result<AppPluginSummary, String> {
+    state.knowledge.compact_plugin(&package)
+}
+
+#[tauri::command]
 fn generate_app_tests(
     state: State<'_, AppState>,
     package: String,
@@ -479,10 +502,11 @@ async fn build_debug_snapshot(
 ) -> Result<DebugSnapshot, String> {
     device::ensure_device_ready(&input.device_serial).await?;
     let label = format!("debug-{}", Utc::now().format("%Y%m%d-%H%M%S"));
-    let observation =
+    let mut observation =
         device::capture_observation(&input.device_serial, &state.artifacts_dir, "_debug", &label)
             .await?;
-    state.knowledge.register_observation(&observation)?;
+    let diagnostics = device::device_diagnostics(&input.device_serial).await?;
+    state.knowledge.register_observation_mut(&mut observation)?;
     let raw_ui_xml = std::fs::read_to_string(&observation.ui_path).unwrap_or_default();
     let package = input
         .package
@@ -523,6 +547,7 @@ async fn build_debug_snapshot(
             .count(),
         artifacts_dir: state.artifacts_dir.to_string_lossy().to_string(),
         data_dir: state.store.data_dir.to_string_lossy().to_string(),
+        diagnostics,
         artifacts,
         efficiency,
     })
@@ -533,6 +558,7 @@ async fn export_debug_bundle(
     state: State<'_, AppState>,
     input: DebugSnapshotInput,
 ) -> Result<String, String> {
+    let device_serial = input.device_serial.clone();
     let snapshot = build_debug_snapshot(state.inner(), input).await?;
     let package = if snapshot.package.trim().is_empty() {
         None
@@ -544,12 +570,33 @@ async fn export_debug_bundle(
         .map(|package| state.knowledge.get_plugin(package))
         .transpose()?;
     let runs = state.store.list_runs(20)?;
+    let run_details = runs
+        .iter()
+        .take(8)
+        .map(|run| {
+            Ok(serde_json::json!({
+                "run": run,
+                "steps": state.store.list_run_steps(&run.id)?,
+                "metrics": state.store.list_step_metrics(&run.id)?,
+                "modelTraces": state.store.list_model_traces(&run.id)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let plugins = state.knowledge.list_plugins()?;
+    let skills = state.store.list_skills()?;
+    let logcat_tail = device::logcat_tail(&device_serial, 400)
+        .await
+        .unwrap_or_else(|error| format!("读取 logcat 失败: {error}"));
     serde_json::to_string_pretty(&serde_json::json!({
         "generatedAt": Utc::now().to_rfc3339(),
         "app": "AI App Test Agent",
         "snapshot": snapshot,
         "plugin": plugin,
-        "recentRuns": runs
+        "plugins": plugins,
+        "skills": skills,
+        "recentRuns": runs,
+        "runDetails": run_details,
+        "logcatTail": logcat_tail
     }))
     .map_err(|error| format!("生成调试包失败: {error}"))
 }
@@ -754,6 +801,7 @@ pub fn run() {
             capture_observation,
             list_packages,
             open_mirror,
+            read_logcat_tail,
             get_settings,
             save_app_settings,
             test_model_connection,
@@ -769,6 +817,7 @@ pub fn run() {
             get_app_plugin,
             export_app_plugin,
             import_app_plugin,
+            compact_app_plugin,
             generate_app_tests,
             read_artifact,
             read_text_artifact,

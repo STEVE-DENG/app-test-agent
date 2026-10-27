@@ -93,6 +93,8 @@ impl AppStore {
                     run_id TEXT NOT NULL,
                     step_index INTEGER NOT NULL,
                     model TEXT NOT NULL DEFAULT '',
+                    prompt_text TEXT NOT NULL DEFAULT '',
+                    endpoint TEXT NOT NULL DEFAULT '',
                     prompt_chars INTEGER NOT NULL DEFAULT 0,
                     system_chars INTEGER NOT NULL DEFAULT 0,
                     node_count INTEGER NOT NULL DEFAULT 0,
@@ -114,6 +116,8 @@ impl AppStore {
             "ALTER TABLE steps ADD COLUMN screenshot_after_path TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE steps ADD COLUMN page_id_before TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE steps ADD COLUMN page_id_after TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE model_traces ADD COLUMN prompt_text TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE model_traces ADD COLUMN endpoint TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = connection.execute(migration, []);
         }
@@ -348,11 +352,14 @@ impl AppStore {
         connection
             .execute(
                 "INSERT INTO model_traces (
-                    run_id, step_index, model, prompt_chars, system_chars, node_count,
-                    use_vision, attempt_count, raw_response, usage_json, duration_ms, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    run_id, step_index, model, prompt_text, endpoint, prompt_chars,
+                    system_chars, node_count, use_vision, attempt_count, raw_response,
+                    usage_json, duration_ms, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(run_id, step_index) DO UPDATE SET
                     model = excluded.model,
+                    prompt_text = excluded.prompt_text,
+                    endpoint = excluded.endpoint,
                     prompt_chars = excluded.prompt_chars,
                     system_chars = excluded.system_chars,
                     node_count = excluded.node_count,
@@ -366,6 +373,8 @@ impl AppStore {
                     trace.run_id,
                     trace.step_index,
                     trace.model,
+                    trace.prompt_text,
+                    trace.endpoint,
                     trace.prompt_chars as i64,
                     trace.system_chars as i64,
                     trace.node_count as i64,
@@ -387,7 +396,8 @@ impl AppStore {
         let mut statement = connection
             .prepare(
                 "SELECT run_id, step_index, model, prompt_chars, system_chars, node_count,
-                        use_vision, attempt_count, raw_response, usage_json, duration_ms, created_at
+                        use_vision, attempt_count, raw_response, usage_json, duration_ms,
+                        created_at, prompt_text, endpoint
                  FROM model_traces
                  WHERE run_id = ?1
                  ORDER BY step_index ASC",
@@ -400,6 +410,8 @@ impl AppStore {
                     run_id: row.get(0)?,
                     step_index: row.get::<_, i64>(1)? as u32,
                     model: row.get(2)?,
+                    prompt_text: row.get(12)?,
+                    endpoint: row.get(13)?,
                     prompt_chars: row.get::<_, i64>(3)? as usize,
                     system_chars: row.get::<_, i64>(4)? as usize,
                     node_count: row.get::<_, i64>(5)? as usize,
@@ -540,6 +552,9 @@ impl AppStore {
         for row in rows {
             let (id, name, description, skill_package, keywords, plan) =
                 row.map_err(|error| format!("读取 Skill 失败: {error}"))?;
+            if !package.is_empty() && !skill_package.is_empty() && skill_package != package {
+                continue;
+            }
             let mut score = 0_i32;
             if !package.is_empty() && !skill_package.is_empty() && skill_package == package {
                 score += 6;

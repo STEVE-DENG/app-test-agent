@@ -52,6 +52,7 @@ export function RunTracePanel({
   const [afterImage, setAfterImage] = useState("");
   const [imageError, setImageError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
   const [showModelResponse, setShowModelResponse] = useState(false);
 
   const metricByStep = useMemo(
@@ -89,6 +90,7 @@ export function RunTracePanel({
     setBeforeImage("");
     setAfterImage("");
     setImageError("");
+    setShowPrompt(false);
     setShowModelResponse(false);
     if (!selected) return;
     const load = async () => {
@@ -286,12 +288,20 @@ export function RunTracePanel({
                     <BrainCircuit size={13} /> MODEL TRACE
                   </span>
                   {selectedModelTrace ? (
-                    <button
-                      type="button"
-                      onClick={() => setShowModelResponse((current) => !current)}
-                    >
-                      {showModelResponse ? "收起响应" : "查看原始响应"}
-                    </button>
+                    <span className="model-trace-actions">
+                      <button
+                        type="button"
+                        onClick={() => setShowPrompt((current) => !current)}
+                      >
+                        {showPrompt ? "收起 Prompt" : "查看 Prompt"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowModelResponse((current) => !current)}
+                      >
+                        {showModelResponse ? "收起响应" : "查看原始响应"}
+                      </button>
+                    </span>
                   ) : null}
                 </div>
                 {selectedModelTrace ? (
@@ -308,6 +318,16 @@ export function RunTracePanel({
                       <code className="model-usage">
                         usage {JSON.stringify(selectedModelTrace.usage)}
                       </code>
+                    ) : null}
+                    {showPrompt ? (
+                      <>
+                        <code className="model-endpoint">
+                          {selectedModelTrace.endpoint}
+                        </code>
+                        <pre className="model-response">
+                          {selectedModelTrace.promptText}
+                        </pre>
+                      </>
                     ) : null}
                     {showModelResponse ? (
                       <pre className="model-response">

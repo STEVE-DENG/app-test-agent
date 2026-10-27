@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio::time::sleep;
 
-use crate::models::{Bounds, DeviceInfo, Observation, UiNode};
+use crate::models::{Bounds, DeviceDiagnostics, DeviceInfo, Observation, UiNode};
 
 pub async fn list_devices() -> Result<Vec<DeviceInfo>, String> {
     ensure_adb_available().await?;
@@ -74,6 +74,115 @@ async fn read_device_info(serial: &str, state: &str) -> DeviceInfo {
     }
 }
 
+pub async fn device_diagnostics(serial: &str) -> Result<DeviceDiagnostics, String> {
+    ensure_device_ready(serial).await?;
+    let adb_version = adb_text(vec!["version".into()])
+        .await
+        .ok()
+        .and_then(|value| value.lines().next().map(str::trim).map(ToString::to_string))
+        .unwrap_or_default();
+    let model = getprop(serial, "ro.product.model")
+        .await
+        .unwrap_or_default();
+    let manufacturer = getprop(serial, "ro.product.manufacturer")
+        .await
+        .unwrap_or_default();
+    let android_version = getprop(serial, "ro.build.version.release")
+        .await
+        .unwrap_or_default();
+    let sdk = getprop(serial, "ro.build.version.sdk")
+        .await
+        .unwrap_or_default();
+    let boot_completed = getprop(serial, "sys.boot_completed")
+        .await
+        .unwrap_or_default();
+    let resolution = display_size(serial)
+        .await
+        .map(|(width, height)| format!("{width} x {height}"))
+        .unwrap_or_default();
+    let density = adb_text(vec![
+        "-s".into(),
+        serial.into(),
+        "shell".into(),
+        "wm".into(),
+        "density".into(),
+    ])
+    .await
+    .unwrap_or_default();
+    let current_activity = foreground_component(serial)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let input_method = adb_text(vec![
+        "-s".into(),
+        serial.into(),
+        "shell".into(),
+        "settings".into(),
+        "get".into(),
+        "secure".into(),
+        "default_input_method".into(),
+    ])
+    .await
+    .unwrap_or_default();
+    let battery_output = adb_text(vec![
+        "-s".into(),
+        serial.into(),
+        "shell".into(),
+        "dumpsys".into(),
+        "battery".into(),
+    ])
+    .await
+    .unwrap_or_default();
+    let power_output = adb_text(vec![
+        "-s".into(),
+        serial.into(),
+        "shell".into(),
+        "dumpsys".into(),
+        "power".into(),
+    ])
+    .await
+    .unwrap_or_default();
+    let battery_level = battery_output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("level:"))
+        .and_then(|value| value.trim().parse::<i32>().ok());
+    let battery_status = battery_output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("status:"))
+        .map(|value| match value.trim() {
+            "2" => "charging",
+            "3" => "discharging",
+            "4" => "not-charging",
+            "5" => "full",
+            _ => "unknown",
+        })
+        .unwrap_or("unknown")
+        .to_string();
+    let screen_state = power_output
+        .lines()
+        .find(|line| line.contains("mWakefulness="))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    Ok(DeviceDiagnostics {
+        serial: serial.to_string(),
+        adb_version,
+        model,
+        manufacturer,
+        android_version,
+        sdk,
+        resolution,
+        density,
+        screen_state,
+        battery_level,
+        battery_status,
+        current_activity,
+        input_method,
+        boot_completed,
+    })
+}
+
 pub async fn ensure_device_ready(serial: &str) -> Result<(), String> {
     ensure_adb_available().await?;
     let output = adb_text(vec!["-s".into(), serial.into(), "get-state".into()]).await?;
@@ -95,14 +204,20 @@ pub async fn capture_observation(
     let run_dir = artifacts_dir.join(run_id);
     fs::create_dir_all(&run_dir).map_err(|error| format!("创建任务证据目录失败: {error}"))?;
 
-    let screenshot = adb_bytes(vec![
+    // Screenshot, accessibility tree and foreground activity are independent
+    // observations. Fetch them together to reduce per-step observation latency.
+    let screenshot_future = adb_bytes(vec![
         "-s".into(),
         serial.into(),
         "exec-out".into(),
         "screencap".into(),
         "-p".into(),
-    ])
-    .await?;
+    ]);
+    let ui_future = dump_ui_xml(serial);
+    let foreground_future = foreground_component(serial);
+    let (screenshot, ui_xml, foreground) =
+        tokio::join!(screenshot_future, ui_future, foreground_future);
+    let screenshot = screenshot?;
     if screenshot.is_empty() {
         return Err("设备返回了空截图，设备可能已锁屏".to_string());
     }
@@ -112,7 +227,7 @@ pub async fn capture_observation(
     let ui_path = run_dir.join(format!("{safe_label}.xml"));
     fs::write(&screenshot_path, &screenshot).map_err(|error| format!("保存截图失败: {error}"))?;
 
-    let ui_xml = dump_ui_xml(serial).await.unwrap_or_default();
+    let ui_xml = ui_xml.unwrap_or_default();
     let nodes = parse_ui_nodes(&ui_xml).unwrap_or_default();
     if !ui_xml.is_empty() {
         fs::write(&ui_path, &ui_xml).map_err(|error| format!("保存 UI 树失败: {error}"))?;
@@ -121,7 +236,7 @@ pub async fn capture_observation(
     let (width, height) = png_dimensions(&screenshot)
         .or_else(|| inferred_dimensions(&nodes))
         .unwrap_or((0, 0));
-    let foreground = foreground_component(serial).await.ok().flatten();
+    let foreground = foreground.ok().flatten();
     let (package, activity) = split_component(foreground.as_deref()).unwrap_or_else(|| {
         let package = nodes
             .iter()
@@ -406,6 +521,19 @@ pub async fn list_packages(serial: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
+pub async fn logcat_tail(serial: &str, lines: u32) -> Result<String, String> {
+    ensure_device_ready(serial).await?;
+    adb_text(vec![
+        "-s".into(),
+        serial.into(),
+        "logcat".into(),
+        "-d".into(),
+        "-t".into(),
+        lines.clamp(20, 2_000).to_string(),
+    ])
+    .await
+}
+
 pub async fn launch_scrcpy(serial: &str) -> Result<String, String> {
     Command::new("scrcpy")
         .args(["--serial", serial, "--no-audio"])
@@ -429,13 +557,18 @@ pub async fn wait_ms(milliseconds: u64) -> String {
 }
 
 async fn dump_ui_xml(serial: &str) -> Result<String, String> {
+    let remote_path = format!(
+        "/sdcard/ai_apptest_window_{}_{}.xml",
+        std::process::id(),
+        Utc::now().timestamp_micros()
+    );
     adb_text(vec![
         "-s".into(),
         serial.into(),
         "shell".into(),
         "uiautomator".into(),
         "dump".into(),
-        "/sdcard/ai_apptest_window.xml".into(),
+        remote_path.clone(),
     ])
     .await?;
     adb_text(vec![
@@ -443,7 +576,7 @@ async fn dump_ui_xml(serial: &str) -> Result<String, String> {
         serial.into(),
         "exec-out".into(),
         "cat".into(),
-        "/sdcard/ai_apptest_window.xml".into(),
+        remote_path,
     ])
     .await
 }

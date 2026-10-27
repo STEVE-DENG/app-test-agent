@@ -2,6 +2,7 @@ import {
   ArrowDownToLine,
   Camera,
   CircleStop,
+  Combine,
   FileJson,
   GitBranch,
   Layers3,
@@ -36,6 +37,7 @@ type Props = {
   onStartExploration: (maxSteps: number) => void;
   onStopExploration: () => void;
   onGenerateTests: () => void;
+  onCompact: () => void;
   onRunTest: (testId: string) => void;
   onExport: () => void;
   onImport: (file: File) => void;
@@ -331,6 +333,7 @@ export function KnowledgePanel({
   onStartExploration,
   onStopExploration,
   onGenerateTests,
+  onCompact,
   onRunTest,
   onExport,
   onImport,
@@ -467,6 +470,10 @@ export function KnowledgePanel({
           >
             <Sparkles size={14} />
             生成用例
+          </button>
+          <button type="button" onClick={onCompact} disabled={!selectedPackage || !plugin}>
+            <Combine size={14} />
+            合并重复页面
           </button>
           <button type="button" onClick={onRefresh} disabled={!selectedPackage}>
             <RefreshCw size={14} />

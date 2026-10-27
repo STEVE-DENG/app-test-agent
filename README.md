@@ -11,9 +11,11 @@
 - 成功轨迹编译为可审核 Skill。
 - 已批准 Skill 在相似任务中优先召回。
 - 页面图、控件截图和跳转关系沉淀为 App 插件。
+- 动态页面聚类与重复页面合并，避免页面图被同一首页/Flutter 容器撑爆。
 - 自动遍历与生成导航测试用例。
 - 有界持续学习 Loop：有增量继续，连续无增长自动停止。
-- 调试台：原始 UI XML、截图、节点、页面签名、耗时统计和证据导出。
+- 调试台：原始 UI XML、截图、节点、页面签名、设备诊断、Logcat、模型 Prompt/响应、
+  步骤前后证据、耗时统计和完整调试包导出。
 
 首版功能范围见 [docs/product-spec.md](docs/product-spec.md)。
 长期 Loop 提示词见 [docs/long-run-prompt.md](docs/long-run-prompt.md)。
@@ -45,11 +47,21 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin agent-debug -- \
   <device-serial> com.taobao.idlefish
 ```
 
+合并插件中的重复页面：
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin agent-compact -- \
+  "$HOME/Library/Application Support/com.nekoya.ai-apptest-agent" \
+  com.taobao.idlefish
+```
+
 ## 调试入口
 
 - 底部 `调试台`：采集截图/UI XML，查看页面签名、可操作节点、原始 XML、证据文件和耗时。
-- `导出调试包`：导出当前快照、App 插件、最近任务和证据索引。
-- `页面图谱 -> 自动遍历`：单轮探索并更新闲鱼插件。
+- `读取 Logcat`：获取最近 400 行设备日志；完整调试包也会附带 logcat 尾部。
+- `导出调试包`：导出当前快照、设备诊断、App 插件、Skill、最近任务、步骤耗时和模型轨迹。
+- `页面图谱 -> 合并重复页面`：按 Activity + 稳定元素相似度聚类动态页面。
+- `页面图谱 -> 自动遍历`：有界探索并更新闲鱼插件。
 - `调试台 -> 启动长期 Loop`：多轮持续学习，可用于积累闲鱼全部可见操作能力。
 
 ## 配置

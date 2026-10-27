@@ -550,9 +550,9 @@ async fn capture(
     run_id: &str,
     label: &str,
 ) -> Result<Observation, String> {
-    let observation =
+    let mut observation =
         device::capture_observation(device_serial, &deps.artifacts_dir, run_id, label).await?;
-    deps.knowledge.register_observation(&observation)?;
+    deps.knowledge.register_observation_mut(&mut observation)?;
     Ok(observation)
 }
 

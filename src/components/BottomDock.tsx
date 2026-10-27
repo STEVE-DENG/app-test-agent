@@ -82,6 +82,7 @@ type Props = {
   onStartExploration: (maxSteps: number) => void;
   onStopExploration: () => void;
   onGenerateTests: () => void;
+  onCompactPlugin: () => void;
   onRunTest: (testId: string) => void;
   onExportPlugin: () => void;
   onImportPlugin: (file: File) => void;
@@ -154,6 +155,7 @@ export function BottomDock({
   onStartExploration,
   onStopExploration,
   onGenerateTests,
+  onCompactPlugin,
   onRunTest,
   onExportPlugin,
   onImportPlugin,
@@ -249,6 +251,7 @@ export function BottomDock({
             onStartExploration={onStartExploration}
             onStopExploration={onStopExploration}
             onGenerateTests={onGenerateTests}
+            onCompact={onCompactPlugin}
             onRunTest={onRunTest}
             onExport={onExportPlugin}
             onImport={onImportPlugin}

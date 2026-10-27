@@ -54,6 +54,7 @@ pub async fn run_exploration(
     let mut scrolls = HashMap::<String, u32>::new();
     let mut navigation = Vec::<String>::new();
     let mut attempted_routes = HashSet::<String>::new();
+    let mut recovery_attempts = HashMap::<String, u32>::new();
     let mut last_page_id = String::new();
     let mut completed_steps = 0_u32;
     let mut summary = String::new();
@@ -360,8 +361,50 @@ pub async fn run_exploration(
             continue;
         }
 
-        summary =
-            format!("当前页面没有更多未探索控件；已完成 {completed_steps} 步，保留已有页面图。");
+        // A page can be a dead end after its visible controls are exhausted.
+        // Restart the app once to return to the known root, then let the page
+        // graph route the explorer toward another frontier.
+        let attempts = recovery_attempts
+            .entry(observation.page_id.clone())
+            .or_default();
+        if *attempts < 1 {
+            *attempts += 1;
+            device::start_app(&device_serial, &package).await?;
+            device::wait_ms(1_000).await;
+            let after = capture(
+                &deps,
+                &device_serial,
+                &run_id,
+                &label("recover-root", completed_steps + 1),
+            )
+            .await?;
+            completed_steps += 1;
+            navigation.clear();
+            scrolls.clear();
+            emit(
+                deps.app.as_ref(),
+                &run_id,
+                "exploration_recovery",
+                "回到 App 根页面",
+                &format!(
+                    "{} → {}，继续寻找可达的未知前沿",
+                    short_page_id(&observation.page_id),
+                    short_page_id(&after.page_id)
+                ),
+                completed_steps,
+                Some(json!({
+                    "fromPageId": observation.page_id,
+                    "toPageId": after.page_id,
+                    "reason": "exhausted-current-page"
+                })),
+            );
+            observation = after;
+            continue;
+        }
+
+        summary = format!(
+            "当前页面没有更多未探索控件，且已尝试回到根页面；已完成 {completed_steps} 步，保留已有页面图。"
+        );
         break;
     }
 
@@ -611,7 +654,17 @@ fn node_label(node: &UiNode) -> Option<String> {
     } else if !node.content_description.trim().is_empty() {
         node.content_description.trim()
     } else {
-        return None;
+        let id = node
+            .resource_id
+            .trim()
+            .strip_prefix("android:id/")
+            .or_else(|| node.resource_id.trim().rsplit('/').next())
+            .unwrap_or_default();
+        if !id.is_empty() {
+            return Some(format!("id:{id}"));
+        }
+        let class = node.class_name.rsplit('.').next().unwrap_or("控件");
+        return Some(format!("{class}#{}", node.index));
     };
     let label = value.lines().map(str::trim).find(|line| {
         !line.is_empty()
@@ -653,9 +706,9 @@ async fn capture(
     run_id: &str,
     label: &str,
 ) -> Result<Observation, String> {
-    let observation =
+    let mut observation =
         device::capture_observation(device_serial, &deps.artifacts_dir, run_id, label).await?;
-    deps.knowledge.register_observation(&observation)?;
+    deps.knowledge.register_observation_mut(&mut observation)?;
     Ok(observation)
 }
 

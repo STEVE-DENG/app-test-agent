@@ -95,6 +95,15 @@ impl KnowledgeStore {
         serde_json::to_string_pretty(&plugin).map_err(|error| format!("导出 App 插件失败: {error}"))
     }
 
+    pub fn compact_plugin(&self, package: &str) -> Result<AppPluginSummary, String> {
+        let _guard = self.lock()?;
+        let mut plugin = self.load_or_create(package)?;
+        compact_duplicate_pages(&mut plugin);
+        plugin.updated_at = Utc::now().to_rfc3339();
+        self.save(&plugin)?;
+        Ok(summary(&plugin))
+    }
+
     pub fn import_plugin(&self, raw: &str) -> Result<AppPluginSummary, String> {
         let incoming: AppKnowledgePlugin =
             serde_json::from_str(raw).map_err(|error| format!("解析 App 插件失败: {error}"))?;
@@ -140,6 +149,16 @@ impl KnowledgeStore {
         let page = upsert_page(&mut plugin, observation);
         plugin.updated_at = Utc::now().to_rfc3339();
         self.save(&plugin)?;
+        Ok(page)
+    }
+
+    pub fn register_observation_mut(
+        &self,
+        observation: &mut Observation,
+    ) -> Result<KnowledgePage, String> {
+        let page = self.register_observation(observation)?;
+        observation.page_id = page.id.clone();
+        observation.page_signature = page.signature.clone();
         Ok(page)
     }
 
@@ -442,12 +461,14 @@ fn upsert_page(plugin: &mut AppKnowledgePlugin, observation: &Observation) -> Kn
         .collect::<Vec<_>>();
     let inferred_name = infer_page_name(observation);
     let now = Utc::now().to_rfc3339();
-
-    if let Some(page) = plugin
+    let existing_index = plugin
         .pages
-        .iter_mut()
-        .find(|page| page.id == observation.page_id)
-    {
+        .iter()
+        .position(|page| page.id == observation.page_id)
+        .or_else(|| find_similar_page_index(plugin, observation, &inferred_name, &elements));
+
+    if let Some(index) = existing_index {
+        let page = &mut plugin.pages[index];
         page.last_seen_at = now;
         page.visit_count += 1;
         page.screenshot_path = observation.screenshot_path.clone();
@@ -460,10 +481,19 @@ fn upsert_page(plugin: &mut AppKnowledgePlugin, observation: &Observation) -> Kn
         let mut merged = page
             .elements
             .drain(..)
-            .map(|element| (element.key.clone(), element))
+            .map(|element| (element_slot_key(&element), element))
             .collect::<HashMap<_, _>>();
         for element in elements {
-            merged.insert(element.key.clone(), element);
+            let slot = element_slot_key(&element);
+            if let Some(existing) = merged.get_mut(&slot) {
+                let existing_key = existing.key.clone();
+                *existing = element;
+                // Keep the first observed key so existing transitions and
+                // generated test cases remain stable across dynamic labels.
+                existing.key = existing_key;
+            } else {
+                merged.insert(slot, element);
+            }
         }
         page.elements = merged.into_values().collect();
         page.elements
@@ -492,6 +522,99 @@ fn upsert_page(plugin: &mut AppKnowledgePlugin, observation: &Observation) -> Kn
         plugin.name = package_display_name(&observation.package);
     }
     page
+}
+
+fn find_similar_page_index(
+    plugin: &AppKnowledgePlugin,
+    observation: &Observation,
+    inferred_name: &str,
+    elements: &[KnowledgeElement],
+) -> Option<usize> {
+    let incoming = stable_element_tokens(elements);
+    if incoming.len() < 2 {
+        return None;
+    }
+    plugin
+        .pages
+        .iter()
+        .enumerate()
+        .filter(|(_, page)| {
+            page.package == observation.package && page.activity == observation.activity
+        })
+        .filter_map(|(index, page)| {
+            let existing = stable_element_tokens(&page.elements);
+            if existing.len() < 2 {
+                return None;
+            }
+            let intersection = incoming.intersection(&existing).count();
+            let union = incoming.union(&existing).count();
+            let similarity = intersection as f64 / union.max(1) as f64;
+            let same_name = page.name == inferred_name;
+            let both_weak = is_weak_page_name(&page.name) && is_weak_page_name(inferred_name);
+            let (min_intersection, min_similarity) =
+                if same_name && !is_weak_page_name(inferred_name) {
+                    (8, 0.12)
+                } else if both_weak {
+                    (5, 0.35)
+                } else {
+                    (4, 0.45)
+                };
+            (intersection >= min_intersection && similarity >= min_similarity).then_some((
+                index,
+                intersection,
+                similarity,
+            ))
+        })
+        .max_by(|left, right| {
+            left.1
+                .cmp(&right.1)
+                .then_with(|| left.2.total_cmp(&right.2))
+        })
+        .map(|(index, _, _)| index)
+}
+
+fn stable_element_tokens(elements: &[KnowledgeElement]) -> HashSet<String> {
+    elements
+        .iter()
+        .filter_map(|element| {
+            if !element.resource_id.trim().is_empty() {
+                return Some(format!("id:{}", element.resource_id.trim()));
+            }
+            if !element.content_description.trim().is_empty() {
+                return Some(format!(
+                    "desc:{}|{}",
+                    element.class_name.trim(),
+                    element.content_description.trim()
+                ));
+            }
+            let text = element.text.trim();
+            if text.is_empty() || text.chars().all(|character| character.is_ascii_digit()) {
+                None
+            } else {
+                Some(format!("text:{}|{}", element.class_name.trim(), text))
+            }
+        })
+        .collect()
+}
+
+fn element_slot_key(element: &KnowledgeElement) -> String {
+    if !element.resource_id.trim().is_empty() {
+        return format!("id:{}", element.resource_id.trim());
+    }
+    if !element.content_description.trim().is_empty() {
+        return format!(
+            "desc:{}|{}",
+            element.class_name.trim(),
+            element.content_description.trim()
+        );
+    }
+    format!(
+        "slot:{}|{}|{}|{}",
+        element.class_name.trim(),
+        element.bounds.left,
+        element.bounds.top,
+        element.bounds.right
+    )
 }
 
 fn to_knowledge_element(node: &UiNode) -> KnowledgeElement {
@@ -752,6 +875,179 @@ fn choose_start_page(plugin: &AppKnowledgePlugin) -> Option<&KnowledgePage> {
         })
 }
 
+fn compact_duplicate_pages(plugin: &mut AppKnowledgePlugin) {
+    if plugin.pages.len() < 2 {
+        return;
+    }
+    let pages = plugin.pages.clone();
+    let mut consumed = HashSet::<usize>::new();
+    let mut remap = HashMap::<String, String>::new();
+    let mut compacted = Vec::<KnowledgePage>::new();
+
+    for index in 0..pages.len() {
+        if consumed.contains(&index) {
+            continue;
+        }
+        let mut canonical = pages[index].clone();
+        consumed.insert(index);
+        for candidate_index in index + 1..pages.len() {
+            if consumed.contains(&candidate_index) {
+                continue;
+            }
+            let candidate = &pages[candidate_index];
+            if !pages_are_similar(&canonical, candidate) {
+                continue;
+            }
+            merge_knowledge_page(&mut canonical, candidate);
+            remap.insert(candidate.id.clone(), canonical.id.clone());
+            consumed.insert(candidate_index);
+        }
+        compacted.push(canonical);
+    }
+    for transition in &mut plugin.transitions {
+        transition.from_page_id = remap
+            .get(&transition.from_page_id)
+            .cloned()
+            .unwrap_or_else(|| transition.from_page_id.clone());
+        transition.to_page_id = remap
+            .get(&transition.to_page_id)
+            .cloned()
+            .unwrap_or_else(|| transition.to_page_id.clone());
+    }
+    let mut seen_transitions = HashSet::new();
+    plugin.transitions.retain(|transition| {
+        transition.from_page_id != transition.to_page_id
+            && seen_transitions.insert((
+                transition.from_page_id.clone(),
+                transition.to_page_id.clone(),
+                transition.trigger_key.clone(),
+                transition.tool.clone(),
+            ))
+    });
+
+    for action in &mut plugin.actions {
+        action.from_page_id = remap
+            .get(&action.from_page_id)
+            .cloned()
+            .unwrap_or_else(|| action.from_page_id.clone());
+        action.to_page_id = remap
+            .get(&action.to_page_id)
+            .cloned()
+            .unwrap_or_else(|| action.to_page_id.clone());
+    }
+
+    let mut best_tests = HashMap::<(String, String), crate::models::AppTestCase>::new();
+    for mut test_case in plugin.test_cases.drain(..) {
+        test_case.start_page_id = remap
+            .get(&test_case.start_page_id)
+            .cloned()
+            .unwrap_or_else(|| test_case.start_page_id.clone());
+        test_case.target_page_id = remap
+            .get(&test_case.target_page_id)
+            .cloned()
+            .unwrap_or_else(|| test_case.target_page_id.clone());
+        test_case.id = format!("{}:{}", test_case.package, test_case.target_page_id);
+        for step in &mut test_case.steps {
+            step.from_page_id = remap
+                .get(&step.from_page_id)
+                .cloned()
+                .unwrap_or_else(|| step.from_page_id.clone());
+            step.expected_page_id = remap
+                .get(&step.expected_page_id)
+                .cloned()
+                .unwrap_or_else(|| step.expected_page_id.clone());
+        }
+        let key = (
+            test_case.start_page_id.clone(),
+            test_case.target_page_id.clone(),
+        );
+        let should_replace = best_tests.get(&key).is_none_or(|existing| {
+            test_case_rank(&test_case.status) < test_case_rank(&existing.status)
+                || (test_case_rank(&test_case.status) == test_case_rank(&existing.status)
+                    && test_case.updated_at > existing.updated_at)
+        });
+        if should_replace {
+            best_tests.insert(key, test_case);
+        }
+    }
+    plugin.test_cases = best_tests.into_values().collect();
+    plugin
+        .test_cases
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    plugin.pages = compacted;
+}
+
+fn test_case_rank(status: &str) -> u8 {
+    match status {
+        "verified" => 0,
+        "running" => 1,
+        "failed" => 2,
+        _ => 3,
+    }
+}
+
+fn pages_are_similar(left: &KnowledgePage, right: &KnowledgePage) -> bool {
+    if left.package != right.package || left.activity != right.activity {
+        return false;
+    }
+    let left_tokens = stable_element_tokens(&left.elements);
+    let right_tokens = stable_element_tokens(&right.elements);
+    if left_tokens.len() < 2 || right_tokens.len() < 2 {
+        return false;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count();
+    let union = left_tokens.union(&right_tokens).count();
+    let similarity = intersection as f64 / union.max(1) as f64;
+    let same_name = left.name == right.name;
+    let both_weak = is_weak_page_name(&left.name) && is_weak_page_name(&right.name);
+    let (min_intersection, min_similarity) = if same_name && !is_weak_page_name(&left.name) {
+        (8, 0.12)
+    } else if both_weak {
+        (5, 0.35)
+    } else {
+        (4, 0.45)
+    };
+    intersection >= min_intersection && similarity >= min_similarity
+}
+
+fn merge_knowledge_page(target: &mut KnowledgePage, incoming: &KnowledgePage) {
+    target.visit_count = target.visit_count.saturating_add(incoming.visit_count);
+    if incoming.first_seen_at < target.first_seen_at {
+        target.first_seen_at = incoming.first_seen_at.clone();
+    }
+    if incoming.last_seen_at > target.last_seen_at {
+        target.last_seen_at = incoming.last_seen_at.clone();
+        target.screenshot_path = incoming.screenshot_path.clone();
+        target.ui_path = incoming.ui_path.clone();
+        target.width = incoming.width;
+        target.height = incoming.height;
+    }
+    if is_weak_page_name(&target.name) && !is_weak_page_name(&incoming.name) {
+        target.name = incoming.name.clone();
+    }
+
+    let mut elements = target
+        .elements
+        .drain(..)
+        .map(|element| (element_slot_key(&element), element))
+        .collect::<HashMap<_, _>>();
+    for element in &incoming.elements {
+        let slot = element_slot_key(element);
+        if let Some(existing) = elements.get_mut(&slot) {
+            let existing_key = existing.key.clone();
+            *existing = element.clone();
+            existing.key = existing_key;
+        } else {
+            elements.insert(slot, element.clone());
+        }
+    }
+    target.elements = elements.into_values().collect();
+    target
+        .elements
+        .sort_by_key(|element| (element.bounds.top, element.bounds.left));
+    target.elements.truncate(MAX_ELEMENTS_PER_PAGE);
+}
+
 fn merge_plugins(target: &mut AppKnowledgePlugin, incoming: AppKnowledgePlugin) {
     for page in incoming.pages {
         if let Some(existing) = target.pages.iter_mut().find(|item| item.id == page.id) {
@@ -979,5 +1275,46 @@ mod tests {
         ];
         assert_eq!(selected_tab_label(&obs).as_deref(), Some("北京"));
         assert_eq!(infer_page_name(&obs), "同城");
+    }
+
+    #[test]
+    fn clusters_same_named_pages_with_dynamic_content() {
+        let now = Utc::now().to_rfc3339();
+        let element = |index: usize, text: &str| KnowledgeElement {
+            key: format!("el-{index}"),
+            index,
+            text: text.to_string(),
+            content_description: String::new(),
+            resource_id: format!("com.example:id/slot-{index}"),
+            class_name: "android.widget.TextView".to_string(),
+            bounds: Bounds {
+                left: 0,
+                top: index as i32 * 10,
+                right: 100,
+                bottom: index as i32 * 10 + 10,
+            },
+            clickable: true,
+            scrollable: false,
+            focusable: true,
+        };
+        let page = |id: &str, text: &str| KnowledgePage {
+            id: id.to_string(),
+            name: "首页".to_string(),
+            signature: id.to_string(),
+            package: "com.example".to_string(),
+            activity: "com.example.MainActivity".to_string(),
+            screenshot_path: String::new(),
+            ui_path: String::new(),
+            width: 1080,
+            height: 2400,
+            first_seen_at: now.clone(),
+            last_seen_at: now.clone(),
+            visit_count: 1,
+            elements: (0..10).map(|index| element(index, text)).collect(),
+        };
+        let left = page("page-a", "动态商品 A");
+        let mut right = page("page-b", "动态商品 B");
+        right.elements[0].text = "另一个标题".to_string();
+        assert!(pages_are_similar(&left, &right));
     }
 }
