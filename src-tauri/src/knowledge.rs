@@ -1143,6 +1143,9 @@ mod tests {
         Observation {
             device_serial: "test".to_string(),
             screenshot_data_url: String::new(),
+            model_screenshot_data_url: None,
+            model_screenshot_path: None,
+            model_screenshot_error: None,
             screenshot_path: "/tmp/page.png".to_string(),
             ui_path: "/tmp/page.xml".to_string(),
             nodes: vec![UiNode {
@@ -1173,6 +1176,9 @@ mod tests {
             captured_at: Utc::now().to_rfc3339(),
             width: 1080,
             height: 2400,
+            ocr: None,
+            ocr_path: None,
+            ocr_error: None,
         }
     }
 

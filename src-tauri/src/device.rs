@@ -10,7 +10,11 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio::time::sleep;
 
-use crate::models::{Bounds, DeviceDiagnostics, DeviceInfo, Observation, UiNode};
+use crate::models::{
+    Bounds, DeviceDiagnostics, DeviceInfo, Observation, OcrBlock, OcrResult, UiNode,
+};
+
+const VISION_OCR_SOURCE: &str = include_str!("../resources/vision_ocr.m");
 
 pub async fn list_devices() -> Result<Vec<DeviceInfo>, String> {
     ensure_adb_available().await?;
@@ -204,34 +208,68 @@ pub async fn capture_observation(
     let run_dir = artifacts_dir.join(run_id);
     fs::create_dir_all(&run_dir).map_err(|error| format!("创建任务证据目录失败: {error}"))?;
 
-    // Screenshot, accessibility tree and foreground activity are independent
-    // observations. Fetch them together to reduce per-step observation latency.
-    let screenshot_future = adb_bytes(vec![
+    // The screenshot is needed before OCR can run. Once it is available, OCR,
+    // the accessibility tree and foreground activity are collected together.
+    let screenshot = adb_bytes(vec![
         "-s".into(),
         serial.into(),
         "exec-out".into(),
         "screencap".into(),
         "-p".into(),
-    ]);
-    let ui_future = dump_ui_xml(serial);
-    let foreground_future = foreground_component(serial);
-    let (screenshot, ui_xml, foreground) =
-        tokio::join!(screenshot_future, ui_future, foreground_future);
-    let screenshot = screenshot?;
+    ])
+    .await?;
     if screenshot.is_empty() {
         return Err("设备返回了空截图，设备可能已锁屏".to_string());
     }
 
     let safe_label = sanitize_file_label(label);
     let screenshot_path = run_dir.join(format!("{safe_label}.png"));
+    let model_screenshot_path = run_dir.join(format!("{safe_label}.model.jpg"));
     let ui_path = run_dir.join(format!("{safe_label}.xml"));
     fs::write(&screenshot_path, &screenshot).map_err(|error| format!("保存截图失败: {error}"))?;
+    let screenshot_data_url = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&screenshot)
+    );
 
+    let ocr_path = run_dir.join(format!("{safe_label}.ocr.json"));
+    let ocr_future = recognize_visual_text(&screenshot_path);
+    let model_image_future = prepare_model_screenshot(&screenshot_path, &model_screenshot_path);
+    let (ui_xml, foreground, ocr_outcome, model_image_outcome) = tokio::join!(
+        dump_ui_xml(serial),
+        foreground_component(serial),
+        ocr_future,
+        model_image_future
+    );
     let ui_xml = ui_xml.unwrap_or_default();
     let nodes = parse_ui_nodes(&ui_xml).unwrap_or_default();
     if !ui_xml.is_empty() {
         fs::write(&ui_path, &ui_xml).map_err(|error| format!("保存 UI 树失败: {error}"))?;
     }
+    let (ocr, ocr_error) = match ocr_outcome {
+        Ok(mut result) => {
+            associate_ocr_blocks(&mut result.blocks, &nodes);
+            let raw = serde_json::to_string_pretty(&result)
+                .map_err(|error| format!("序列化 OCR 结果失败: {error}"))?;
+            if let Err(error) = fs::write(&ocr_path, raw) {
+                (Some(result), Some(format!("保存 OCR 结果失败: {error}")))
+            } else {
+                (Some(result), None)
+            }
+        }
+        Err(error) => {
+            let raw = serde_json::json!({
+                "engine": "apple-vision",
+                "error": error,
+                "capturedAt": Utc::now().to_rfc3339()
+            });
+            let _ = fs::write(
+                &ocr_path,
+                serde_json::to_string_pretty(&raw).unwrap_or_default(),
+            );
+            (None, Some(error))
+        }
+    };
 
     let (width, height) = png_dimensions(&screenshot)
         .or_else(|| inferred_dimensions(&nodes))
@@ -248,14 +286,22 @@ pub async fn capture_observation(
 
     let page_signature = page_signature(&package, &activity, &nodes);
     let page_id = page_signature[..16].to_string();
-    let screenshot_data_url = format!(
-        "data:image/png;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(&screenshot)
-    );
+    let (model_screenshot_data_url, model_screenshot_path, model_screenshot_error) =
+        match model_image_outcome {
+            Ok(data_url) => (data_url, model_screenshot_path, None),
+            Err(error) => (
+                screenshot_data_url.clone(),
+                screenshot_path.clone(),
+                Some(error),
+            ),
+        };
 
     Ok(Observation {
         device_serial: serial.to_string(),
         screenshot_data_url,
+        model_screenshot_data_url: Some(model_screenshot_data_url),
+        model_screenshot_path: Some(model_screenshot_path.to_string_lossy().to_string()),
+        model_screenshot_error,
         screenshot_path: screenshot_path.to_string_lossy().to_string(),
         ui_path: ui_path.to_string_lossy().to_string(),
         nodes,
@@ -266,6 +312,9 @@ pub async fn capture_observation(
         captured_at: Utc::now().to_rfc3339(),
         width,
         height,
+        ocr,
+        ocr_path: Some(ocr_path.to_string_lossy().to_string()),
+        ocr_error,
     })
 }
 
@@ -649,6 +698,177 @@ pub fn parse_bounds(raw: &str) -> Option<Bounds> {
     })
 }
 
+async fn recognize_visual_text(image_path: &Path) -> Result<OcrResult, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("当前平台没有配置 Vision OCR".to_string());
+    }
+
+    let tools_dir = image_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .unwrap_or(image_path)
+        .join("tools");
+    fs::create_dir_all(&tools_dir).map_err(|error| format!("创建 OCR 工具目录失败: {error}"))?;
+    let source_path = tools_dir.join("vision_ocr_objc_v1.m");
+    let binary_path = tools_dir.join("vision_ocr_objc_v1");
+    let source_changed = fs::read_to_string(&source_path)
+        .map(|existing| existing != VISION_OCR_SOURCE)
+        .unwrap_or(true);
+    if source_changed {
+        fs::write(&source_path, VISION_OCR_SOURCE)
+            .map_err(|error| format!("写入 Vision OCR 源码失败: {error}"))?;
+    }
+    if source_changed || !binary_path.exists() {
+        let output = Command::new("clang")
+            .arg("-fobjc-arc")
+            .arg("-fmodules")
+            .arg("-O2")
+            .arg("-mmacosx-version-min=11.0")
+            .arg("-framework")
+            .arg("Foundation")
+            .arg("-framework")
+            .arg("Vision")
+            .arg("-framework")
+            .arg("ImageIO")
+            .arg("-framework")
+            .arg("CoreGraphics")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&binary_path)
+            .output()
+            .await
+            .map_err(|error| format!("启动 clang 编译 Vision OCR 失败: {error}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!("编译 Vision OCR 失败: {stderr}"));
+        }
+    }
+
+    let output = Command::new(&binary_path)
+        .arg(image_path)
+        .output()
+        .await
+        .map_err(|error| format!("运行 Vision OCR 失败: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "Vision OCR 返回失败状态".to_string()
+        });
+    }
+    serde_json::from_slice::<OcrResult>(&output.stdout)
+        .map_err(|error| format!("解析 Vision OCR JSON 失败: {error}"))
+}
+
+async fn prepare_model_screenshot(source: &Path, target: &Path) -> Result<String, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("当前平台没有配置模型图像压缩".to_string());
+    }
+    let output = Command::new("sips")
+        .arg("-Z")
+        .arg("900")
+        .arg("-s")
+        .arg("format")
+        .arg("jpeg")
+        .arg("-s")
+        .arg("formatOptions")
+        .arg("65")
+        .arg(source)
+        .arg("--out")
+        .arg(target)
+        .output()
+        .await
+        .map_err(|error| format!("启动 sips 生成模型图像失败: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("生成模型图像失败: {stderr}"));
+    }
+    let bytes = fs::read(target).map_err(|error| format!("读取模型图像失败: {error}"))?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn associate_ocr_blocks(blocks: &mut [OcrBlock], nodes: &[UiNode]) {
+    for block in blocks {
+        let (center_x, center_y) = block.bounds.center();
+        let normalized = normalize_ocr_text(&block.text);
+        block.matched_node_index = nodes
+            .iter()
+            .filter(|node| node.visible)
+            .filter(|node| {
+                center_x >= node.bounds.left
+                    && center_x <= node.bounds.right
+                    && center_y >= node.bounds.top
+                    && center_y <= node.bounds.bottom
+            })
+            .min_by_key(|node| {
+                let node_text = normalize_ocr_text(&format!(
+                    "{} {} {}",
+                    node.text, node.content_description, node.resource_id
+                ));
+                let semantic_rank = if node_text == normalized {
+                    0
+                } else if !node_text.is_empty()
+                    && (node_text.contains(&normalized) || normalized.contains(&node_text))
+                {
+                    1
+                } else {
+                    2
+                };
+                (
+                    semantic_rank,
+                    if node.clickable { 0 } else { 1 },
+                    node.bounds.area(),
+                )
+            })
+            .map(|node| node.index);
+    }
+}
+
+pub fn find_ocr_block<'a>(ocr: Option<&'a OcrResult>, needle: &str) -> Option<&'a OcrBlock> {
+    let needle = normalize_ocr_text(needle);
+    if needle.is_empty() {
+        return None;
+    }
+    ocr?.blocks
+        .iter()
+        .filter(|block| block.confidence >= 0.25)
+        .filter_map(|block| {
+            let text = normalize_ocr_text(&block.text);
+            let score = if text == needle {
+                0
+            } else if text.contains(&needle) {
+                1 + text.chars().count().saturating_sub(needle.chars().count())
+            } else if needle.contains(&text) {
+                2 + needle.chars().count().saturating_sub(text.chars().count())
+            } else {
+                return None;
+            };
+            Some((score, block))
+        })
+        .min_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| right.1.confidence.total_cmp(&left.1.confidence))
+        })
+        .map(|(_, block)| block)
+}
+
+fn normalize_ocr_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 pub fn find_node_by_text<'a>(nodes: &'a [UiNode], needle: &str) -> Option<&'a UiNode> {
     let needle = needle.trim().to_lowercase();
     if needle.is_empty() {
@@ -974,6 +1194,7 @@ fn sanitize_file_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::OcrRect;
 
     #[test]
     fn parses_android_bounds() {
@@ -1044,5 +1265,61 @@ mod tests {
             },
         ];
         assert_eq!(find_node_by_text(&nodes, "搜索").unwrap().index, 1);
+    }
+
+    #[test]
+    fn associates_ocr_blocks_with_ui_nodes_and_finds_visual_fallback() {
+        let nodes = vec![UiNode {
+            index: 7,
+            text: "搜索".into(),
+            content_description: String::new(),
+            resource_id: "com.example:id/search".into(),
+            class_name: "android.widget.TextView".into(),
+            package: "com.example".into(),
+            bounds: Bounds {
+                left: 20,
+                top: 100,
+                right: 220,
+                bottom: 180,
+            },
+            clickable: true,
+            enabled: true,
+            focusable: true,
+            scrollable: false,
+            selected: false,
+            visible: true,
+            depth: 2,
+        }];
+        let mut blocks = vec![OcrBlock {
+            text: " 搜索 ".into(),
+            confidence: 0.94,
+            bounds: OcrRect {
+                left: 45.0,
+                top: 118.0,
+                right: 180.0,
+                bottom: 160.0,
+            },
+            normalized_bounds: OcrRect {
+                left: 0.04,
+                top: 0.05,
+                right: 0.17,
+                bottom: 0.08,
+            },
+            matched_node_index: None,
+        }];
+        associate_ocr_blocks(&mut blocks, &nodes);
+        assert_eq!(blocks[0].matched_node_index, Some(7));
+
+        let ocr = OcrResult {
+            engine: "apple-vision".into(),
+            width: 1080,
+            height: 2400,
+            elapsed_ms: 42,
+            blocks,
+        };
+        assert_eq!(
+            find_ocr_block(Some(&ocr), "搜索").unwrap().text.trim(),
+            "搜索"
+        );
     }
 }

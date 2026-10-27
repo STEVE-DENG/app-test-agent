@@ -34,6 +34,29 @@ export type Bounds = {
   bottom: number;
 };
 
+export type OcrRect = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+};
+
+export type OcrBlock = {
+  text: string;
+  confidence: number;
+  bounds: OcrRect;
+  normalizedBounds: OcrRect;
+  matchedNodeIndex?: number | null;
+};
+
+export type OcrResult = {
+  engine: string;
+  width: number;
+  height: number;
+  elapsedMs: number;
+  blocks: OcrBlock[];
+};
+
 export type UiNode = {
   index: number;
   text: string;
@@ -54,6 +77,9 @@ export type UiNode = {
 export type Observation = {
   deviceSerial: string;
   screenshotDataUrl: string;
+  modelScreenshotDataUrl?: string | null;
+  modelScreenshotPath?: string | null;
+  modelScreenshotError?: string | null;
   screenshotPath: string;
   uiPath: string;
   nodes: UiNode[];
@@ -64,6 +90,9 @@ export type Observation = {
   capturedAt: string;
   width: number;
   height: number;
+  ocr?: OcrResult | null;
+  ocrPath?: string | null;
+  ocrError?: string | null;
 };
 
 export type KnowledgeElement = {
@@ -204,6 +233,9 @@ export type DebugSnapshot = {
   pageSignature: string;
   capturedAt: string;
   screenshotPath: string;
+  modelScreenshotPath?: string | null;
+  modelScreenshotDataUrl?: string | null;
+  modelScreenshotError?: string | null;
   uiPath: string;
   screenshotDataUrl: string;
   rawUiXml: string;
@@ -217,6 +249,9 @@ export type DebugSnapshot = {
   diagnostics: DeviceDiagnostics;
   artifacts: ArtifactInfo[];
   efficiency: EfficiencyStats;
+  ocr?: OcrResult | null;
+  ocrPath?: string | null;
+  ocrError?: string | null;
 };
 
 export type LearningRoundReport = {

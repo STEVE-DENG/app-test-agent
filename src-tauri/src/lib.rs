@@ -179,6 +179,9 @@ pub async fn run_headless_debug(
         page_signature: observation.page_signature.clone(),
         captured_at: observation.captured_at.clone(),
         screenshot_path: observation.screenshot_path.clone(),
+        model_screenshot_path: observation.model_screenshot_path.clone(),
+        model_screenshot_data_url: observation.model_screenshot_data_url.clone(),
+        model_screenshot_error: observation.model_screenshot_error.clone(),
         ui_path: observation.ui_path.clone(),
         screenshot_data_url: observation.screenshot_data_url.clone(),
         raw_ui_xml,
@@ -200,6 +203,9 @@ pub async fn run_headless_debug(
         diagnostics,
         artifacts: collect_artifact_infos(&artifacts_dir, 80),
         efficiency,
+        ocr: observation.ocr.clone(),
+        ocr_path: observation.ocr_path.clone(),
+        ocr_error: observation.ocr_error.clone(),
     })
 }
 
@@ -529,6 +535,9 @@ async fn build_debug_snapshot(
         page_signature: observation.page_signature.clone(),
         captured_at: observation.captured_at.clone(),
         screenshot_path: observation.screenshot_path.clone(),
+        model_screenshot_path: observation.model_screenshot_path.clone(),
+        model_screenshot_data_url: observation.model_screenshot_data_url.clone(),
+        model_screenshot_error: observation.model_screenshot_error.clone(),
         ui_path: observation.ui_path.clone(),
         screenshot_data_url: observation.screenshot_data_url.clone(),
         raw_ui_xml,
@@ -550,6 +559,9 @@ async fn build_debug_snapshot(
         diagnostics,
         artifacts,
         efficiency,
+        ocr: observation.ocr.clone(),
+        ocr_path: observation.ocr_path.clone(),
+        ocr_error: observation.ocr_error.clone(),
     })
 }
 
@@ -622,12 +634,21 @@ fn collect_artifact_infos(root: &std::path::Path, limit: usize) -> Vec<ArtifactI
                 .and_then(|value| value.to_str())
                 .unwrap_or_default()
                 .to_lowercase();
-            let kind = match extension.as_str() {
-                "png" | "jpg" | "jpeg" | "webp" => "image",
-                "xml" => "ui-tree",
-                "json" => "json",
-                "db" | "sqlite" => "database",
-                _ => "file",
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let kind = if name.ends_with(".ocr.json") {
+                "ocr"
+            } else {
+                match extension.as_str() {
+                    "png" | "jpg" | "jpeg" | "webp" => "image",
+                    "xml" => "ui-tree",
+                    "json" => "json",
+                    "db" | "sqlite" => "database",
+                    _ => "file",
+                }
             };
             let modified_at = metadata
                 .modified()
@@ -637,11 +658,7 @@ fn collect_artifact_infos(root: &std::path::Path, limit: usize) -> Vec<ArtifactI
                 .unwrap_or_default();
             files.push(ArtifactInfo {
                 path: path.to_string_lossy().to_string(),
-                name: path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_string(),
+                name,
                 kind: kind.to_string(),
                 size: metadata.len(),
                 modified_at,

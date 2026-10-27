@@ -755,6 +755,9 @@ mod tests {
         Observation {
             device_serial: "test".to_string(),
             screenshot_data_url: String::new(),
+            model_screenshot_data_url: None,
+            model_screenshot_path: None,
+            model_screenshot_error: None,
             screenshot_path: String::new(),
             ui_path: String::new(),
             nodes: vec![
@@ -808,6 +811,9 @@ mod tests {
             captured_at: String::new(),
             width: 1080,
             height: 2400,
+            ocr: None,
+            ocr_path: None,
+            ocr_error: None,
         }
     }
 

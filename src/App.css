@@ -949,6 +949,40 @@ code {
   inset: 0;
 }
 
+.ocr-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ocr-overlay span,
+.ocr-overlay button {
+  position: absolute;
+  min-width: 1px;
+  min-height: 1px;
+  padding: 0;
+  background: rgba(255, 91, 53, 0.035);
+  border: 1px dashed rgba(255, 91, 53, 0.75);
+  border-radius: 2px;
+}
+
+.ocr-overlay .is-linked {
+  background: rgba(12, 109, 100, 0.045);
+  border-color: rgba(72, 207, 183, 0.82);
+}
+
+.stage-ocr-overlay button {
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.stage-ocr-overlay button:hover {
+  z-index: 4;
+  background: rgba(72, 207, 183, 0.18);
+  border-color: #8ce6d2;
+}
+
 .node-box {
   position: absolute;
   padding: 0;
@@ -3964,7 +3998,13 @@ code {
   gap: 8px;
 }
 
-.snapshot-body img {
+.snapshot-image-stack {
+  position: relative;
+  align-self: start;
+  min-width: 0;
+}
+
+.snapshot-image-stack img {
   width: 100%;
   max-height: 120px;
   object-fit: contain;
@@ -3984,6 +4024,83 @@ code {
   color: var(--ink-soft);
   font-size: 7.5px;
   overflow-wrap: anywhere;
+}
+
+.ocr-evidence {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.ocr-evidence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ocr-evidence-head > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--teal);
+  font-family: "SFMono-Regular", monospace;
+  font-size: 6.5px;
+}
+
+.ocr-evidence-head button {
+  padding: 3px 5px;
+  color: var(--ink-mute);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 6.5px;
+  cursor: pointer;
+}
+
+.ocr-evidence > p {
+  margin: 5px 0 0;
+  color: var(--ink-mute);
+}
+
+.ocr-block-list {
+  display: flex;
+  max-height: 82px;
+  margin-top: 5px;
+  overflow: auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ocr-block-list > div {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) 30px 62px 48px;
+  gap: 5px;
+  align-items: baseline;
+  padding: 2px 4px;
+  background: rgba(12, 109, 100, 0.035);
+  border-radius: 3px;
+}
+
+.ocr-block-list strong {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 7px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocr-block-list span,
+.ocr-block-list code,
+.ocr-block-list small {
+  color: var(--ink-mute);
+  font-family: "SFMono-Regular", monospace;
+  font-size: 6px;
+}
+
+.ocr-block-list small {
+  color: var(--teal);
 }
 
 .raw-toggle-row {
@@ -4119,6 +4236,11 @@ code {
 .artifact-kind.image {
   color: var(--orange-deep);
   background: rgba(255, 91, 53, 0.08);
+}
+
+.artifact-kind.ocr {
+  color: var(--teal);
+  background: rgba(12, 109, 100, 0.1);
 }
 
 .artifact-list strong {

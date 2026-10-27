@@ -10,6 +10,7 @@ import {
   Layers3,
   Play,
   RefreshCw,
+  ScanSearch,
   Square,
   TerminalSquare,
   Timer,
@@ -82,6 +83,8 @@ export function DebugPanel({
   onExport,
 }: Props) {
   const [showRawXml, setShowRawXml] = useState(false);
+  const [showOcr, setShowOcr] = useState(true);
+  const [showModelImage, setShowModelImage] = useState(false);
   const [maxCycles, setMaxCycles] = useState(8);
   const [maxSteps, setMaxSteps] = useState(45);
   const [stagnant, setStagnant] = useState(2);
@@ -196,6 +199,28 @@ export function DebugPanel({
           >
             <Copy size={14} />
             {copied && copiedKind === "节点" ? "已复制" : "复制节点 JSON"}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              snapshot &&
+              void copyValue(
+                JSON.stringify(
+                  {
+                    ocr: snapshot.ocr,
+                    error: snapshot.ocrError,
+                    path: snapshot.ocrPath,
+                  },
+                  null,
+                  2,
+                ),
+                "OCR",
+              )
+            }
+            disabled={!snapshot}
+          >
+            <ScanSearch size={14} />
+            {copied && copiedKind === "OCR" ? "已复制" : "复制 OCR JSON"}
           </button>
           <button
             type="button"
@@ -430,7 +455,45 @@ export function DebugPanel({
                 </div>
               </div>
               <div className="snapshot-body">
-                <img src={snapshot.screenshotDataUrl} alt="debug snapshot" />
+                <div className="snapshot-image-stack">
+                  <img
+                    src={
+                      showModelImage && snapshot.modelScreenshotDataUrl
+                        ? snapshot.modelScreenshotDataUrl
+                        : snapshot.screenshotDataUrl
+                    }
+                    alt={showModelImage ? "model input" : "debug snapshot"}
+                  />
+                  {showOcr && snapshot.ocr?.blocks.length ? (
+                    <div className="ocr-overlay" aria-label="OCR 识别框">
+                      {snapshot.ocr.blocks.slice(0, 120).map((block, index) => {
+                        const width = snapshot.ocr?.width || 1;
+                        const height = snapshot.ocr?.height || 1;
+                        return (
+                          <span
+                            key={`${block.text}-${index}`}
+                            className={
+                              block.matchedNodeIndex == null
+                                ? "is-orphan"
+                                : "is-linked"
+                            }
+                            style={{
+                              left: `${(block.bounds.left / width) * 100}%`,
+                              top: `${(block.bounds.top / height) * 100}%`,
+                              width: `${((block.bounds.right - block.bounds.left) / width) * 100}%`,
+                              height: `${((block.bounds.bottom - block.bounds.top) / height) * 100}%`,
+                            }}
+                            title={`${block.text} · ${(block.confidence * 100).toFixed(0)}%${
+                              block.matchedNodeIndex == null
+                                ? " · 仅视觉"
+                                : ` · node #${block.matchedNodeIndex}`
+                            }`}
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
                 <div className="snapshot-facts">
                   <span>
                     <TerminalSquare size={13} /> {snapshot.activity || "Unknown activity"}
@@ -439,12 +502,63 @@ export function DebugPanel({
                     <FileCode2 size={13} /> {snapshot.visibleNodeCount} visible ·{" "}
                     {snapshot.scrollableNodeCount} scrollable
                   </span>
+                  <span>
+                    <ScanSearch size={13} /> {snapshot.ocr?.blocks.length || 0} OCR blocks ·{" "}
+                    {snapshot.ocr?.elapsedMs || 0} ms
+                  </span>
                   <code>{snapshot.package}</code>
                   <code>{snapshot.uiPath}</code>
                   <code>{snapshot.screenshotPath}</code>
+                  {snapshot.modelScreenshotPath ? (
+                    <code>{snapshot.modelScreenshotPath}</code>
+                  ) : null}
+                  {snapshot.modelScreenshotError ? (
+                    <code>模型图压缩失败：{snapshot.modelScreenshotError}</code>
+                  ) : null}
+                  {snapshot.ocrPath ? <code>{snapshot.ocrPath}</code> : null}
                 </div>
               </div>
+              <div className="ocr-evidence">
+                <div className="ocr-evidence-head">
+                  <span>
+                    <ScanSearch size={12} /> OCR · {snapshot.ocr?.engine || "unavailable"}
+                  </span>
+                  <button type="button" onClick={() => setShowOcr((value) => !value)}>
+                    {showOcr ? "隐藏识别框" : "显示识别框"}
+                  </button>
+                </div>
+                {snapshot.ocrError ? (
+                  <p>{snapshot.ocrError}</p>
+                ) : snapshot.ocr?.blocks.length ? (
+                  <div className="ocr-block-list">
+                    {snapshot.ocr.blocks.slice(0, 12).map((block, index) => (
+                      <div key={`${block.text}-${index}`}>
+                        <strong>{block.text}</strong>
+                        <span>{(block.confidence * 100).toFixed(0)}%</span>
+                        <code>
+                          {Math.round(block.bounds.left)},{Math.round(block.bounds.top)}
+                        </code>
+                        <small>
+                          {block.matchedNodeIndex == null
+                            ? "视觉孤立"
+                            : `node #${block.matchedNodeIndex}`}
+                        </small>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p>当前截图没有识别到文字；可结合 UI 树继续定位。</p>
+                )}
+              </div>
               <div className="raw-toggle-row">
+                <button
+                  type="button"
+                  onClick={() => setShowModelImage((value) => !value)}
+                  disabled={!snapshot.modelScreenshotDataUrl}
+                >
+                  <ScanSearch size={13} />
+                  {showModelImage ? "查看原始截图" : "查看模型输入"}
+                </button>
                 <button type="button" onClick={() => setShowRawXml((value) => !value)}>
                   <Braces size={13} />
                   {showRawXml ? "隐藏原始 UI XML" : "查看原始 UI XML"}

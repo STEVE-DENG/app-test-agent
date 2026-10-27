@@ -5,7 +5,9 @@
 核心能力：
 
 - ADB 设备发现、截图和 accessibility/UI 树采集。
-- 截图 + UI 树 + 多模态模型混合感知。
+- 截图 + UI 树 + 模型视觉 + Apple Vision OCR 混合感知。
+- OCR 文本与控件节点关联；UI 树定位失败时自动使用 OCR 坐标兜底。
+- 原图用于调试，900px JPEG 用于模型输入，减少视觉 token 和上传延迟。
 - Tool Use/ReAct 单步执行循环。
 - SQLite 任务轨迹和证据记录。
 - 成功轨迹编译为可审核 Skill。
@@ -14,8 +16,8 @@
 - 动态页面聚类与重复页面合并，避免页面图被同一首页/Flutter 容器撑爆。
 - 自动遍历与生成导航测试用例。
 - 有界持续学习 Loop：有增量继续，连续无增长自动停止。
-- 调试台：原始 UI XML、截图、节点、页面签名、设备诊断、Logcat、模型 Prompt/响应、
-  步骤前后证据、耗时统计和完整调试包导出。
+- 调试台：原始 UI XML、截图、OCR 框、模型输入图、节点、页面签名、设备诊断、
+  Logcat、模型 Prompt/响应、步骤前后证据、耗时统计和完整调试包导出。
 
 首版功能范围见 [docs/product-spec.md](docs/product-spec.md)。
 长期 Loop 提示词见 [docs/long-run-prompt.md](docs/long-run-prompt.md)。
@@ -47,6 +49,15 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin agent-debug -- \
   <device-serial> com.taobao.idlefish
 ```
 
+终端快速摘要（不输出 2-3MB base64 截图）：
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin agent-debug -- \
+  --summary \
+  "$HOME/Library/Application Support/com.nekoya.ai-apptest-agent" \
+  <device-serial> com.taobao.idlefish
+```
+
 合并插件中的重复页面：
 
 ```bash
@@ -57,7 +68,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin agent-compact -- \
 
 ## 调试入口
 
-- 底部 `调试台`：采集截图/UI XML，查看页面签名、可操作节点、原始 XML、证据文件和耗时。
+- 底部 `调试台`：采集截图/UI XML/OCR，查看 OCR 文本块与坐标、模型实际输入图、页面签名、可操作节点、原始 XML、证据文件和耗时。
 - `读取 Logcat`：获取最近 400 行设备日志；完整调试包也会附带 logcat 尾部。
 - `导出调试包`：导出当前快照、设备诊断、App 插件、Skill、最近任务、步骤耗时和模型轨迹。
 - `页面图谱 -> 合并重复页面`：按 Activity + 稳定元素相似度聚类动态页面。

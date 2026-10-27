@@ -829,33 +829,42 @@ async fn execute_tool(
         }
         "tap_text" => {
             let text = required_str(args, "text")?;
-            let (x, y, matched_text, resource_id, bounds) =
-                if let Some(node) = device::find_node_by_text(&observation.nodes, text) {
-                    (
-                        node.bounds.center().0,
-                        node.bounds.center().1,
-                        node.text.clone(),
-                        node.resource_id.clone(),
-                        node.bounds,
-                    )
-                } else {
-                    let nodes = device::dump_ui_nodes(serial).await?;
-                    let node = device::find_node_by_text(&nodes, text)
-                        .ok_or_else(|| format!("当前页面找不到可点击文本: {text}"))?;
-                    (
-                        node.bounds.center().0,
-                        node.bounds.center().1,
-                        node.text.clone(),
-                        node.resource_id.clone(),
-                        node.bounds,
-                    )
-                };
+            if let Some(node) = device::find_node_by_text(&observation.nodes, text) {
+                let (x, y) = node.bounds.center();
+                let message = device::tap(serial, x, y).await?;
+                return Ok(json!({
+                    "message": message,
+                    "locatorSource": "ui_tree",
+                    "matchedText": node.text,
+                    "resourceId": node.resource_id,
+                    "bounds": node.bounds
+                }));
+            }
+
+            let nodes = device::dump_ui_nodes(serial).await?;
+            if let Some(node) = device::find_node_by_text(&nodes, text) {
+                let (x, y) = node.bounds.center();
+                let message = device::tap(serial, x, y).await?;
+                return Ok(json!({
+                    "message": message,
+                    "locatorSource": "ui_tree_retry",
+                    "matchedText": node.text,
+                    "resourceId": node.resource_id,
+                    "bounds": node.bounds
+                }));
+            }
+
+            let block = device::find_ocr_block(observation.ocr.as_ref(), text)
+                .ok_or_else(|| format!("当前页面 UI 树和 OCR 都找不到可点击文本: {text}"))?;
+            let (x, y) = block.bounds.center();
             let message = device::tap(serial, x, y).await?;
             Ok(json!({
                 "message": message,
-                "matchedText": matched_text,
-                "resourceId": resource_id,
-                "bounds": bounds
+                "locatorSource": "ocr_visual",
+                "matchedText": block.text,
+                "confidence": block.confidence,
+                "bounds": block.bounds,
+                "matchedNodeIndex": block.matched_node_index
             }))
         }
         "tap_id" => {
@@ -1021,11 +1030,15 @@ async fn ask_model(
             ));
         }
         let content = if settings.use_vision {
+            let model_image = observation
+                .model_screenshot_data_url
+                .as_deref()
+                .unwrap_or(&observation.screenshot_data_url);
             json!([
                 { "type": "text", "text": prompt },
                 {
                     "type": "image_url",
-                    "image_url": { "url": observation.screenshot_data_url }
+                    "image_url": { "url": model_image }
                 }
             ])
         } else {
@@ -1034,6 +1047,7 @@ async fn ask_model(
         let body = json!({
             "model": settings.model,
             "temperature": settings.temperature,
+            "max_tokens": 700,
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": content }
@@ -1149,6 +1163,7 @@ fn user_prompt(
     last_error: Option<&str>,
 ) -> String {
     let nodes = compact_nodes(&observation.nodes, MODEL_NODE_LIMIT);
+    let ocr_summary = compact_ocr(observation, 12);
     let recent_history = history
         .iter()
         .rev()
@@ -1185,13 +1200,14 @@ fn user_prompt(
     };
 
     format!(
-        "用户任务：{instruction}\n设备：{device_serial}\n当前步骤：{step_index}/{max_steps}\n前台：{} / {}\n页面签名：{}\n视口：{}x{}\n\n可操作 UI 节点 JSON：\n{}\n\n最近执行记录：\n{}\n\n相似已验证 Skill：\n{}\n\n上一次工具错误：\n{}\n\n请基于当前屏幕截图和 UI 节点决定下一步。只返回一个 JSON 工具调用。",
+        "用户任务：{instruction}\n设备：{device_serial}\n当前步骤：{step_index}/{max_steps}\n前台：{} / {}\n页面签名：{}\n视口：{}x{}\n\n可操作 UI 节点 JSON：\n{}\n\nOCR 视觉文本（按未匹配到 UI 节点的块优先；坐标可作 tap 兜底）：\n{}\n\n最近执行记录：\n{}\n\n相似已验证 Skill：\n{}\n\n上一次工具错误：\n{}\n\n请基于当前屏幕截图、UI 节点和 OCR 文本决定下一步。只返回一个 JSON 工具调用。",
         observation.package,
         observation.activity,
         &observation.page_signature[..observation.page_signature.len().min(16)],
         observation.width,
         observation.height,
-        serde_json::to_string_pretty(&nodes).unwrap_or_else(|_| "[]".to_string()),
+        serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()),
+        ocr_summary,
         if recent_history.is_empty() {
             "无"
         } else {
@@ -1200,6 +1216,87 @@ fn user_prompt(
         skill_text,
         last_error.unwrap_or("无")
     )
+}
+
+fn compact_ocr(observation: &Observation, limit: usize) -> String {
+    let Some(ocr) = observation.ocr.as_ref() else {
+        return observation
+            .ocr_error
+            .as_deref()
+            .map(|error| format!("OCR 不可用：{error}"))
+            .unwrap_or_else(|| "OCR 不可用".to_string());
+    };
+    let mut blocks = ocr
+        .blocks
+        .iter()
+        .filter(|block| block.confidence >= 0.25)
+        .map(|block| {
+            let missing_in_ui = block.matched_node_index.is_none_or(|index| {
+                observation
+                    .nodes
+                    .iter()
+                    .find(|node| node.index == index)
+                    .map(|node| {
+                        let text = ocr_comparable_text(&block.text);
+                        let node_text = ocr_comparable_text(&format!(
+                            "{} {} {}",
+                            node.text, node.content_description, node.resource_id
+                        ));
+                        text.is_empty()
+                            || node_text.is_empty()
+                            || !(node_text.contains(&text) || text.contains(&node_text))
+                    })
+                    .unwrap_or(true)
+            });
+            (missing_in_ui, block)
+        })
+        .collect::<Vec<_>>();
+    let missing_count = blocks
+        .iter()
+        .filter(|(missing_in_ui, _)| *missing_in_ui)
+        .count();
+    blocks.sort_by_key(|(missing_in_ui, block)| {
+        (
+            !*missing_in_ui,
+            block.bounds.top.round() as i32,
+            block.bounds.left.round() as i32,
+        )
+    });
+    let values = blocks
+        .into_iter()
+        .take(limit)
+        .map(|(missing_in_ui, block)| {
+            json!({
+                "text": block.text,
+                "confidence": (block.confidence * 100.0).round() / 100.0,
+                "bounds": [
+                    block.bounds.left.round() as i32,
+                    block.bounds.top.round() as i32,
+                    block.bounds.right.round() as i32,
+                    block.bounds.bottom.round() as i32
+                ],
+                "nodeIndex": block.matched_node_index,
+                "missingInUiText": missing_in_ui
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "engine={} elapsed={}ms blocks={} missingInUi={} shown={}\n{}",
+        ocr.engine,
+        ocr.elapsed_ms,
+        ocr.blocks.len(),
+        missing_count,
+        values.len(),
+        serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string())
+    )
+}
+
+fn ocr_comparable_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn compact_nodes(nodes: &[UiNode], limit: usize) -> Vec<Value> {

@@ -69,6 +69,14 @@ export function DeviceStage({
               <i />
               {observation ? `${observation.nodes.length} NODES` : "UI TREE"}
             </span>
+            <span className={observation?.ocr ? "signal live teal" : "signal"}>
+              <i />
+              {observation?.ocr
+                ? `${observation.ocr.blocks.length} OCR`
+                : observation?.ocrError
+                  ? "OCR OFF"
+                  : "OCR"}
+            </span>
           </div>
           <button
             className="secondary-button compact"
@@ -160,6 +168,37 @@ export function DeviceStage({
                   );
                 })}
               </div>
+              {observation.ocr?.blocks.length ? (
+                <div className="ocr-overlay stage-ocr-overlay">
+                  {observation.ocr.blocks.slice(0, 120).map((block, index) => {
+                    const left = (block.bounds.left / viewportWidth) * 100;
+                    const top = (block.bounds.top / viewportHeight) * 100;
+                    const width =
+                      ((block.bounds.right - block.bounds.left) / viewportWidth) * 100;
+                    const height =
+                      ((block.bounds.bottom - block.bounds.top) / viewportHeight) * 100;
+                    const matched = observation.nodes.find(
+                      (node) => node.index === block.matchedNodeIndex,
+                    );
+                    return (
+                      <button
+                        key={`${block.text}-${index}`}
+                        type="button"
+                        className={matched ? "is-linked" : "is-orphan"}
+                        style={{
+                          left: `${left}%`,
+                          top: `${top}%`,
+                          width: `${width}%`,
+                          height: `${height}%`,
+                        }}
+                        onClick={() => matched && onSelectNode(matched)}
+                        title={`OCR: ${block.text} · ${(block.confidence * 100).toFixed(0)}%`}
+                        aria-label={`OCR ${block.text}`}
+                      />
+                    );
+                  })}
+                </div>
+              ) : null}
               <div className="scan-wash" />
             </div>
 

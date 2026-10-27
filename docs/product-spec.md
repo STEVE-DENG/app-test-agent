@@ -34,10 +34,13 @@
 | MVP | accessibility/UI 树采集 | 解析 uiautomator XML 中的文本、描述、ID、bounds |
 | MVP | 页面签名 | 根据前台 App、关键节点和截图生成页面签名 |
 | MVP | 视觉输入 | 支持将截图作为多模态模型输入 |
+| 已实现 | 模型输入图压缩 | 保留原图用于调试，另生成 900px JPEG 供模型使用 |
 | MVP | 结构化输入 | 将压缩后的 UI 树和前台 Activity 一起发送给模型 |
 | MVP | 点击区域可视化 | 截图与元素列表可联动查看 |
-| 后续 | OCR 兜底 | 无可用 UI 树时提取文字区域 |
-| 后续 | 视觉 grounding 兜底 | 使用视觉模型定位图标和自绘控件 |
+| 已实现 | OCR 兜底 | Apple Vision 提取文字、bounds 和置信度 |
+| 已实现 | OCR + UI 节点关联 | OCR 文本块标记匹配的 UI 节点并保留孤立视觉文本 |
+| 已实现 | OCR 视觉定位 | `tap_text` 在 UI 树定位失败时使用 OCR 坐标 |
+| 后续 | 通用视觉 grounding | 使用视觉模型定位图标和完全自绘控件 |
 
 ### 2.3 Agent 执行
 
@@ -132,7 +135,8 @@
 | 已实现 | 阶段耗时 | 记录每步模型、工具、观察和知识写入耗时 |
 | 已实现 | 效率汇总 | 统计任务数、平均步数、平均每步耗时、页面/跳转/用例数量 |
 | 已实现 | 实时事件流 | 调试台展示探索、学习、知识写入等事件 |
-| 后续 | OCR/视觉 grounding 调试 | 叠加 OCR 文本块、视觉定位框和置信度 |
+| 已实现 | OCR 调试 | 截图叠加 OCR 框，查看文本、像素坐标、置信度和匹配节点 |
+| 已实现 | 模型输入检查 | 在调试台切换查看模型实际收到的压缩图 |
 | 后续 | 模型请求回放 | 保存请求摘要、响应原文和 token 使用量 |
 | 后续 | 失败聚类 | 按页面、控件和错误类型汇总失败原因 |
 
@@ -155,6 +159,7 @@ ADB Device Driver (MVP)
   - device discovery
   - screenshot
   - uiautomator XML
+  - Apple Vision OCR
   - tap / swipe / text / key / app launch
         |
         v

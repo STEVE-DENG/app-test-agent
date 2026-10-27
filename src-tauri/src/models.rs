@@ -43,6 +43,45 @@ pub struct Bounds {
     pub bottom: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrRect {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+impl OcrRect {
+    pub fn center(&self) -> (i32, i32) {
+        (
+            ((self.left + self.right) / 2.0).round() as i32,
+            ((self.top + self.bottom) / 2.0).round() as i32,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrBlock {
+    pub text: String,
+    pub confidence: f64,
+    pub bounds: OcrRect,
+    pub normalized_bounds: OcrRect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_node_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrResult {
+    pub engine: String,
+    pub width: i32,
+    pub height: i32,
+    pub elapsed_ms: u64,
+    pub blocks: Vec<OcrBlock>,
+}
+
 impl Bounds {
     pub fn center(&self) -> (i32, i32) {
         ((self.left + self.right) / 2, (self.top + self.bottom) / 2)
@@ -91,6 +130,12 @@ impl UiNode {
 pub struct Observation {
     pub device_serial: String,
     pub screenshot_data_url: String,
+    #[serde(default)]
+    pub model_screenshot_data_url: Option<String>,
+    #[serde(default)]
+    pub model_screenshot_path: Option<String>,
+    #[serde(default)]
+    pub model_screenshot_error: Option<String>,
     pub screenshot_path: String,
     pub ui_path: String,
     pub nodes: Vec<UiNode>,
@@ -101,6 +146,12 @@ pub struct Observation {
     pub captured_at: String,
     pub width: i32,
     pub height: i32,
+    #[serde(default)]
+    pub ocr: Option<OcrResult>,
+    #[serde(default)]
+    pub ocr_path: Option<String>,
+    #[serde(default)]
+    pub ocr_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +314,12 @@ pub struct DebugSnapshot {
     pub page_signature: String,
     pub captured_at: String,
     pub screenshot_path: String,
+    #[serde(default)]
+    pub model_screenshot_path: Option<String>,
+    #[serde(default)]
+    pub model_screenshot_data_url: Option<String>,
+    #[serde(default)]
+    pub model_screenshot_error: Option<String>,
     pub ui_path: String,
     pub screenshot_data_url: String,
     pub raw_ui_xml: String,
@@ -276,6 +333,12 @@ pub struct DebugSnapshot {
     pub diagnostics: DeviceDiagnostics,
     pub artifacts: Vec<ArtifactInfo>,
     pub efficiency: EfficiencyStats,
+    #[serde(default)]
+    pub ocr: Option<OcrResult>,
+    #[serde(default)]
+    pub ocr_path: Option<String>,
+    #[serde(default)]
+    pub ocr_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
