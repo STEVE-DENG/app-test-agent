@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::models::{
-    EfficiencyStats, RunRecord, SkillHint, SkillPlanStep, SkillRecord, StepMetricRecord, ToolRecord,
+    EfficiencyStats, ModelTraceRecord, RunRecord, SkillHint, SkillPlanStep, SkillRecord,
+    StepMetricRecord, ToolRecord,
 };
 
 pub struct AppStore {
@@ -84,6 +85,22 @@ impl AppStore {
                     observation_ms INTEGER NOT NULL DEFAULT 0,
                     knowledge_ms INTEGER NOT NULL DEFAULT 0,
                     total_ms INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, step_index)
+                );
+
+                CREATE TABLE IF NOT EXISTS model_traces (
+                    run_id TEXT NOT NULL,
+                    step_index INTEGER NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    prompt_chars INTEGER NOT NULL DEFAULT 0,
+                    system_chars INTEGER NOT NULL DEFAULT 0,
+                    node_count INTEGER NOT NULL DEFAULT 0,
+                    use_vision INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    raw_response TEXT NOT NULL DEFAULT '',
+                    usage_json TEXT NOT NULL DEFAULT 'null',
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (run_id, step_index)
                 );
@@ -324,6 +341,79 @@ impl AppStore {
             .map_err(|error| format!("查询步骤耗时失败: {error}"))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("读取步骤耗时失败: {error}"))
+    }
+
+    pub fn save_model_trace(&self, trace: &ModelTraceRecord) -> Result<(), String> {
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "INSERT INTO model_traces (
+                    run_id, step_index, model, prompt_chars, system_chars, node_count,
+                    use_vision, attempt_count, raw_response, usage_json, duration_ms, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(run_id, step_index) DO UPDATE SET
+                    model = excluded.model,
+                    prompt_chars = excluded.prompt_chars,
+                    system_chars = excluded.system_chars,
+                    node_count = excluded.node_count,
+                    use_vision = excluded.use_vision,
+                    attempt_count = excluded.attempt_count,
+                    raw_response = excluded.raw_response,
+                    usage_json = excluded.usage_json,
+                    duration_ms = excluded.duration_ms,
+                    created_at = excluded.created_at",
+                params![
+                    trace.run_id,
+                    trace.step_index,
+                    trace.model,
+                    trace.prompt_chars as i64,
+                    trace.system_chars as i64,
+                    trace.node_count as i64,
+                    if trace.use_vision { 1 } else { 0 },
+                    trace.attempt_count as i64,
+                    trace.raw_response,
+                    serde_json::to_string(&trace.usage)
+                        .map_err(|error| format!("序列化模型 usage 失败: {error}"))?,
+                    trace.duration_ms as i64,
+                    trace.created_at,
+                ],
+            )
+            .map_err(|error| format!("保存模型轨迹失败: {error}"))?;
+        Ok(())
+    }
+
+    pub fn list_model_traces(&self, run_id: &str) -> Result<Vec<ModelTraceRecord>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT run_id, step_index, model, prompt_chars, system_chars, node_count,
+                        use_vision, attempt_count, raw_response, usage_json, duration_ms, created_at
+                 FROM model_traces
+                 WHERE run_id = ?1
+                 ORDER BY step_index ASC",
+            )
+            .map_err(|error| format!("准备模型轨迹查询失败: {error}"))?;
+        let rows = statement
+            .query_map(params![run_id], |row| {
+                let usage_json: String = row.get(9)?;
+                Ok(ModelTraceRecord {
+                    run_id: row.get(0)?,
+                    step_index: row.get::<_, i64>(1)? as u32,
+                    model: row.get(2)?,
+                    prompt_chars: row.get::<_, i64>(3)? as usize,
+                    system_chars: row.get::<_, i64>(4)? as usize,
+                    node_count: row.get::<_, i64>(5)? as usize,
+                    use_vision: row.get::<_, i64>(6)? != 0,
+                    attempt_count: row.get::<_, i64>(7)? as u32,
+                    raw_response: row.get(8)?,
+                    usage: serde_json::from_str(&usage_json).unwrap_or(serde_json::Value::Null),
+                    duration_ms: row.get::<_, i64>(10)? as u64,
+                    created_at: row.get(11)?,
+                })
+            })
+            .map_err(|error| format!("查询模型轨迹失败: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取模型轨迹失败: {error}"))
     }
 
     pub fn create_skill_candidate(

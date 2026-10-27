@@ -20,6 +20,7 @@ import type {
   DeviceInfo,
   EfficiencyStats,
   LearningLoopReport,
+  ModelTraceRecord,
   Observation,
   RunRecord,
   SkillRecord,
@@ -51,6 +52,7 @@ type Props = {
   runs: RunRecord[];
   runSteps: ToolRecord[];
   runMetrics: StepMetricRecord[];
+  runModelTraces: ModelTraceRecord[];
   selectedRunId: string | null;
   observation: Observation | null;
   selectedNode: UiNode | null;
@@ -72,6 +74,7 @@ type Props = {
   onSelectNode: (node: UiNode) => void;
   onSelectRun: (runId: string) => void;
   onOpenDebug: () => void;
+  onOpenPage: (pageId: string) => void;
   onSkillStatus: (skillId: string, status: string) => void;
   onSelectPackage: (packageName: string) => void;
   onSelectPage: (pageId: string) => void;
@@ -125,6 +128,7 @@ export function BottomDock({
   runs,
   runSteps,
   runMetrics,
+  runModelTraces,
   selectedRunId,
   observation,
   selectedNode,
@@ -142,6 +146,7 @@ export function BottomDock({
   onSelectNode,
   onSelectRun,
   onOpenDebug,
+  onOpenPage,
   onSkillStatus,
   onSelectPackage,
   onSelectPage,
@@ -347,7 +352,9 @@ export function BottomDock({
                   run={selectedRun}
                   steps={runSteps}
                   metrics={runMetrics}
+                  modelTraces={runModelTraces}
                   onOpenDebug={onOpenDebug}
+                  onOpenPage={onOpenPage}
                 />
               ) : (
                 <div className="dock-empty compact-empty">

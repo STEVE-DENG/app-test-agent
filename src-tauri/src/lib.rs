@@ -18,9 +18,9 @@ use chrono::Utc;
 use knowledge::KnowledgeStore;
 use models::{
     AgentRunResult, AppKnowledgePlugin, AppPluginSummary, AppTestCase, ArtifactInfo, DebugSnapshot,
-    DebugSnapshotInput, DeviceInfo, EfficiencyStats, LearningLoopInput, Observation, RunRecord,
-    SaveSettingsInput, SettingsView, SkillRecord, StartExplorationInput, StartTaskInput,
-    StepMetricRecord, StoredSettings, ToolRecord,
+    DebugSnapshotInput, DeviceInfo, EfficiencyStats, LearningLoopInput, ModelTraceRecord,
+    Observation, RunRecord, SaveSettingsInput, SettingsView, SkillRecord, StartExplorationInput,
+    StartTaskInput, StepMetricRecord, StoredSettings, ToolRecord,
 };
 use storage::AppStore;
 use tauri::{Manager, State};
@@ -355,6 +355,14 @@ fn list_step_metrics(
     run_id: String,
 ) -> Result<Vec<StepMetricRecord>, String> {
     state.store.list_step_metrics(&run_id)
+}
+
+#[tauri::command]
+fn list_model_traces(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Vec<ModelTraceRecord>, String> {
+    state.store.list_model_traces(&run_id)
 }
 
 #[tauri::command]
@@ -754,6 +762,7 @@ pub fn run() {
             list_runs,
             list_run_steps,
             list_step_metrics,
+            list_model_traces,
             list_skills,
             set_skill_status,
             list_app_plugins,

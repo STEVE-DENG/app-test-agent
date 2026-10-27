@@ -316,3 +316,18 @@ export type StepMetricRecord = {
   totalMs: number;
   createdAt: string;
 };
+
+export type ModelTraceRecord = {
+  runId: string;
+  stepIndex: number;
+  model: string;
+  promptChars: number;
+  systemChars: number;
+  nodeCount: number;
+  useVision: boolean;
+  attemptCount: number;
+  rawResponse: string;
+  usage: Record<string, unknown> | null;
+  durationMs: number;
+  createdAt: string;
+};

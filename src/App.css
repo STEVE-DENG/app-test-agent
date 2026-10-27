@@ -2960,6 +2960,20 @@ code {
   font-size: 6.3px;
 }
 
+.trace-facts button {
+  padding: 3px 5px;
+  color: var(--teal);
+  background: rgba(12, 109, 100, 0.06);
+  border: 1px solid rgba(12, 109, 100, 0.14);
+  border-radius: 4px;
+  font-size: 6.2px;
+  cursor: pointer;
+}
+
+.trace-facts button:hover {
+  border-color: rgba(12, 109, 100, 0.3);
+}
+
 .trace-json-grid,
 .trace-evidence {
   display: grid;
@@ -3033,6 +3047,92 @@ code {
   border-radius: 0 5px 5px 0;
   font-size: 7px;
   line-height: 1.5;
+}
+
+.model-trace {
+  margin-top: 6px;
+  padding: 6px 7px;
+  background: rgba(255, 253, 247, 0.58);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.model-trace-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-trace-head > span,
+.model-trace-head button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.model-trace-head > span {
+  color: var(--teal);
+  font-family: "SFMono-Regular", monospace;
+  font-size: 6.2px;
+  letter-spacing: 0.05em;
+}
+
+.model-trace-head button {
+  padding: 2px 5px;
+  color: var(--ink-mute);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 6px;
+  cursor: pointer;
+}
+
+.model-trace-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.model-trace-facts span {
+  padding: 2px 4px;
+  color: var(--ink-soft);
+  background: rgba(12, 109, 100, 0.055);
+  border-radius: 3px;
+  font-family: "SFMono-Regular", monospace;
+  font-size: 5.8px;
+}
+
+.model-usage {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--ink-mute);
+  font-size: 5.8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-response {
+  max-height: 150px;
+  margin: 5px 0 0;
+  padding: 6px;
+  overflow: auto;
+  color: #dbe9dc;
+  background: #202a25;
+  border-radius: 5px;
+  font-size: 6px;
+  line-height: 1.42;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.model-trace-empty {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-mute);
+  font-size: 6.3px;
 }
 
 .trace-empty {

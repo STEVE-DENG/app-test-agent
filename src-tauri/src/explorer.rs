@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +8,10 @@ use tauri::{AppHandle, Emitter};
 
 use crate::device;
 use crate::knowledge::{KnowledgeStore, element_key};
-use crate::models::{AgentEvent, ExplorationReport, Observation, UiNode};
+use crate::models::{
+    AgentEvent, AppKnowledgePlugin, ExplorationReport, KnowledgePage, Observation, PageTransition,
+    UiNode,
+};
 
 const MAX_SCROLLS_PER_PAGE: u32 = 3;
 const EXPLORATION_BLOCKLIST: &[&str] = &[
@@ -50,6 +53,7 @@ pub async fn run_exploration(
     let mut explored = HashSet::<String>::new();
     let mut scrolls = HashMap::<String, u32>::new();
     let mut navigation = Vec::<String>::new();
+    let mut attempted_routes = HashSet::<String>::new();
     let mut last_page_id = String::new();
     let mut completed_steps = 0_u32;
     let mut summary = String::new();
@@ -191,6 +195,78 @@ pub async fn run_exploration(
             );
             observation = after;
             continue;
+        }
+
+        let plugin = deps.knowledge.get_plugin(&package)?;
+        if let Some(route) = find_route_to_unexplored(
+            &plugin,
+            &observation.page_id,
+            &known_actions,
+            &attempted_routes,
+        ) {
+            let transition = route[0].clone();
+            attempted_routes.insert(transition.id.clone());
+            if let Some(target) = find_transition_target(&observation.nodes, &transition) {
+                let before = observation.clone();
+                let (x, y) = target.bounds.center();
+                device::tap(&device_serial, x, y).await?;
+                device::wait_ms(850).await;
+                let after = capture(
+                    &deps,
+                    &device_serial,
+                    &run_id,
+                    &label("route", completed_steps + 1),
+                )
+                .await?;
+                let result = json!({
+                    "message": format!("沿已验证路径前往 {}", transition.trigger_label),
+                    "fromPageId": before.page_id,
+                    "toPageId": after.page_id,
+                    "targetPageId": route.last().map(|edge| edge.to_page_id.clone()),
+                    "elementKey": transition.trigger_key,
+                });
+                deps.knowledge.record_action(
+                    &run_id,
+                    completed_steps + 1,
+                    &before,
+                    &after,
+                    &transition.tool,
+                    &transition.args,
+                    &result,
+                    before.page_id == after.page_id || after.page_id == transition.to_page_id,
+                )?;
+                if before.page_id != after.page_id && navigation.last() != Some(&before.page_id) {
+                    navigation.push(before.page_id.clone());
+                }
+                completed_steps += 1;
+                emit(
+                    deps.app.as_ref(),
+                    &run_id,
+                    "exploration_route",
+                    "导航到未探索页面",
+                    &format!(
+                        "{} → {} · 目标 {}",
+                        short_page_id(&before.page_id),
+                        short_page_id(&after.page_id),
+                        short_page_id(
+                            route
+                                .last()
+                                .map(|edge| edge.to_page_id.as_str())
+                                .unwrap_or("")
+                        )
+                    ),
+                    completed_steps,
+                    Some(json!({
+                        "transitionId": transition.id,
+                        "fromPageId": before.page_id,
+                        "toPageId": after.page_id,
+                        "targetPageId": route.last().map(|edge| edge.to_page_id.clone()),
+                        "label": transition.trigger_label
+                    })),
+                );
+                observation = after;
+                continue;
+            }
         }
 
         if let Some(previous_page) = navigation.pop() {
@@ -338,6 +414,131 @@ pub async fn run_exploration(
         })),
     );
     Ok(report)
+}
+
+fn find_route_to_unexplored<'a>(
+    plugin: &'a AppKnowledgePlugin,
+    current_page_id: &str,
+    known_actions: &HashSet<String>,
+    attempted_routes: &HashSet<String>,
+) -> Option<Vec<&'a PageTransition>> {
+    let page_by_id = plugin
+        .pages
+        .iter()
+        .map(|page| (page.id.as_str(), page))
+        .collect::<HashMap<_, _>>();
+    let mut edges_by_page = HashMap::<&str, Vec<&PageTransition>>::new();
+    for transition in plugin
+        .transitions
+        .iter()
+        .filter(|transition| transition.success)
+    {
+        if attempted_routes.contains(&transition.id) {
+            continue;
+        }
+        edges_by_page
+            .entry(transition.from_page_id.as_str())
+            .or_default()
+            .push(transition);
+    }
+
+    let mut queue = VecDeque::from([current_page_id]);
+    let mut visited = HashSet::from([current_page_id]);
+    let mut parent = HashMap::<&str, &PageTransition>::new();
+    while let Some(page_id) = queue.pop_front() {
+        if page_id != current_page_id
+            && page_by_id
+                .get(page_id)
+                .is_some_and(|page| page_has_unexplored(page, known_actions))
+        {
+            let mut route = Vec::new();
+            let mut cursor = page_id;
+            while cursor != current_page_id {
+                let edge = parent.get(cursor)?;
+                route.push(*edge);
+                cursor = edge.from_page_id.as_str();
+            }
+            route.reverse();
+            return Some(route);
+        }
+        for edge in edges_by_page.get(page_id).into_iter().flatten() {
+            let next = edge.to_page_id.as_str();
+            if visited.insert(next) {
+                parent.insert(next, edge);
+                queue.push_back(next);
+            }
+        }
+    }
+    None
+}
+
+fn page_has_unexplored(page: &KnowledgePage, known_actions: &HashSet<String>) -> bool {
+    page.elements
+        .iter()
+        .filter(|element| element.clickable || element.scrollable || element.focusable)
+        .filter_map(|element| {
+            let label = if !element.text.trim().is_empty() {
+                element.text.trim()
+            } else if !element.content_description.trim().is_empty() {
+                element.content_description.trim()
+            } else {
+                return None;
+            };
+            if EXPLORATION_BLOCKLIST
+                .iter()
+                .any(|term| label.contains(term))
+            {
+                return None;
+            }
+            Some((
+                format!("{}:{}", page.id, element.key),
+                format!("{}:text:{}", page.id, label),
+                if element.resource_id.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("{}:id:{}", page.id, element.resource_id.trim())
+                },
+            ))
+        })
+        .any(|(element_key, text_key, id_key)| {
+            !known_actions.contains(&element_key)
+                && !known_actions.contains(&text_key)
+                && (id_key.is_empty() || !known_actions.contains(&id_key))
+        })
+}
+
+fn find_transition_target<'a>(
+    nodes: &'a [UiNode],
+    transition: &PageTransition,
+) -> Option<&'a UiNode> {
+    let element_key = transition
+        .args
+        .get("elementKey")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    nodes
+        .iter()
+        .filter(|node| node.is_actionable())
+        .find(|node| {
+            (!element_key.is_empty() && crate::knowledge::element_key(node) == element_key)
+                || (!transition.trigger_key.is_empty()
+                    && crate::knowledge::element_key(node) == transition.trigger_key)
+        })
+        .or_else(|| {
+            transition
+                .args
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|text| device::find_node_by_text(nodes, text))
+        })
+        .or_else(|| {
+            transition
+                .args
+                .get("resource_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|resource_id| device::find_node_by_id(nodes, resource_id))
+        })
+        .or_else(|| device::find_node_by_text(nodes, &transition.trigger_label))
 }
 
 struct Candidate<'a> {

@@ -10,8 +10,8 @@ use tauri::{AppHandle, Emitter};
 use crate::device;
 use crate::knowledge::KnowledgeStore;
 use crate::models::{
-    AgentEvent, AgentRunResult, ModelDecision, Observation, RawModelDecision, SkillHint,
-    StoredSettings, ToolRecord, UiNode,
+    AgentEvent, AgentRunResult, ModelDecision, ModelTraceRecord, Observation, RawModelDecision,
+    SkillHint, StoredSettings, ToolRecord, UiNode,
 };
 use crate::storage::AppStore;
 
@@ -55,6 +55,11 @@ pub struct AgentDeps {
     pub settings: StoredSettings,
     pub artifacts_dir: PathBuf,
     pub cancellation: Arc<AtomicBool>,
+}
+
+struct ModelCallResult {
+    decision: ModelDecision,
+    trace: ModelTraceRecord,
 }
 
 pub async fn run_agent(
@@ -276,8 +281,9 @@ async fn execute_run(
         }
 
         let model_started = Instant::now();
-        let decision = match ask_model(
+        let model_call = match ask_model(
             &deps.settings,
+            run_id,
             instruction,
             device_serial,
             step_index,
@@ -310,6 +316,20 @@ async fn execute_run(
             }
         };
         let model_ms = model_started.elapsed().as_millis() as u64;
+        let decision = model_call.decision;
+        let mut trace = model_call.trace;
+        trace.duration_ms = model_ms;
+        if let Err(error) = deps.store.save_model_trace(&trace) {
+            emit(
+                deps.app.as_ref(),
+                run_id,
+                "model_trace_warning",
+                "模型轨迹写入失败",
+                &error,
+                step_index,
+                None,
+            );
+        }
         last_error = None;
 
         emit(
@@ -321,7 +341,15 @@ async fn execute_run(
             step_index,
             Some(json!({
                 "action": decision.action,
-                "args": decision.args
+                "args": decision.args,
+                "modelTrace": {
+                    "attemptCount": trace.attempt_count,
+                    "promptChars": trace.prompt_chars,
+                    "nodeCount": trace.node_count,
+                    "useVision": trace.use_vision,
+                    "durationMs": trace.duration_ms,
+                    "usage": trace.usage
+                }
             })),
         );
 
@@ -764,6 +792,7 @@ async fn resolve_target(serial: &str, args: &Value) -> Result<(i32, i32), String
 
 async fn ask_model(
     settings: &StoredSettings,
+    run_id: &str,
     instruction: &str,
     device_serial: &str,
     step_index: u32,
@@ -771,7 +800,8 @@ async fn ask_model(
     history: &[String],
     skills: &[SkillHint],
     last_error: Option<&str>,
-) -> Result<ModelDecision, String> {
+) -> Result<ModelCallResult, String> {
+    let started = Instant::now();
     let endpoint = chat_endpoint(&settings.base_url);
     let system_prompt = system_prompt();
     let user_prompt = user_prompt(
@@ -784,12 +814,16 @@ async fn ask_model(
         skills,
         last_error,
     );
+    let prompt_chars = user_prompt.chars().count();
+    let node_count = compact_nodes(&observation.nodes, 72).len();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| format!("创建模型 HTTP 客户端失败: {error}"))?;
 
     let mut last_parse_error = String::new();
+    let mut raw_responses = Vec::new();
+    let mut usage = Value::Null;
     for attempt in 0..2 {
         let mut prompt = user_prompt.clone();
         if attempt > 0 {
@@ -838,14 +872,34 @@ async fn ask_model(
         }
         let parsed: Value = serde_json::from_str(&raw)
             .map_err(|error| format!("解析模型 API JSON 失败: {error}"))?;
+        if let Some(value) = parsed.get("usage") {
+            usage = value.clone();
+        }
         let content = extract_message_content(&parsed)?;
+        raw_responses.push(format!("attempt {}:\n{}", attempt + 1, content));
         match parse_decision(&content) {
             Ok(decision) => {
                 if !ALLOWED_TOOLS.contains(&decision.action.as_str()) {
                     last_parse_error = format!("工具 {} 不在允许列表中", decision.action);
                     continue;
                 }
-                return Ok(decision);
+                return Ok(ModelCallResult {
+                    decision,
+                    trace: ModelTraceRecord {
+                        run_id: run_id.to_string(),
+                        step_index,
+                        model: settings.model.clone(),
+                        prompt_chars,
+                        system_chars: system_prompt.chars().count(),
+                        node_count,
+                        use_vision: settings.use_vision,
+                        attempt_count: attempt as u32 + 1,
+                        raw_response: raw_responses.join("\n\n"),
+                        usage,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        created_at: Utc::now().to_rfc3339(),
+                    },
+                });
             }
             Err(error) => last_parse_error = error,
         }

@@ -1,4 +1,5 @@
 import {
+  BrainCircuit,
   Camera,
   ChevronRight,
   Clipboard,
@@ -10,13 +11,20 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, errorMessage } from "../lib/api";
-import type { RunRecord, StepMetricRecord, ToolRecord } from "../types";
+import type {
+  ModelTraceRecord,
+  RunRecord,
+  StepMetricRecord,
+  ToolRecord,
+} from "../types";
 
 type Props = {
   run: RunRecord;
   steps: ToolRecord[];
   metrics: StepMetricRecord[];
+  modelTraces: ModelTraceRecord[];
   onOpenDebug: () => void;
+  onOpenPage: (pageId: string) => void;
 };
 
 function formatMs(milliseconds: number) {
@@ -28,7 +36,14 @@ function shortSignature(value: string) {
   return value ? value.slice(0, 10) : "—";
 }
 
-export function RunTracePanel({ run, steps, metrics, onOpenDebug }: Props) {
+export function RunTracePanel({
+  run,
+  steps,
+  metrics,
+  modelTraces,
+  onOpenDebug,
+  onOpenPage,
+}: Props) {
   const [filter, setFilter] = useState("");
   const [selectedStep, setSelectedStep] = useState<number | null>(
     steps[0]?.stepIndex ?? null,
@@ -37,13 +52,21 @@ export function RunTracePanel({ run, steps, metrics, onOpenDebug }: Props) {
   const [afterImage, setAfterImage] = useState("");
   const [imageError, setImageError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [showModelResponse, setShowModelResponse] = useState(false);
 
   const metricByStep = useMemo(
     () => new Map(metrics.map((metric) => [metric.stepIndex, metric])),
     [metrics],
   );
+  const modelTraceByStep = useMemo(
+    () => new Map(modelTraces.map((trace) => [trace.stepIndex, trace])),
+    [modelTraces],
+  );
   const selected =
     steps.find((step) => step.stepIndex === selectedStep) || steps[0] || null;
+  const selectedModelTrace = selected
+    ? modelTraceByStep.get(selected.stepIndex) || null
+    : null;
   const visibleSteps = useMemo(() => {
     const query = filter.trim().toLowerCase();
     if (!query) return steps;
@@ -66,6 +89,7 @@ export function RunTracePanel({ run, steps, metrics, onOpenDebug }: Props) {
     setBeforeImage("");
     setAfterImage("");
     setImageError("");
+    setShowModelResponse(false);
     if (!selected) return;
     const load = async () => {
       try {
@@ -96,6 +120,7 @@ export function RunTracePanel({ run, steps, metrics, onOpenDebug }: Props) {
             run,
             step: selected,
             metric: metricByStep.get(selected.stepIndex) || null,
+            modelTrace: modelTraceByStep.get(selected.stepIndex) || null,
           },
           null,
           2,
@@ -199,6 +224,23 @@ export function RunTracePanel({ run, steps, metrics, onOpenDebug }: Props) {
                     {metricByStep.get(selected.stepIndex)?.toolMs} ms
                   </span>
                 ) : null}
+                {selected.pageIdBefore ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenPage(selected.pageIdBefore)}
+                  >
+                    打开 before 页面
+                  </button>
+                ) : null}
+                {selected.pageIdAfter &&
+                selected.pageIdAfter !== selected.pageIdBefore ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenPage(selected.pageIdAfter)}
+                  >
+                    打开 after 页面
+                  </button>
+                ) : null}
               </div>
               <div className="trace-json-grid">
                 <div>
@@ -238,6 +280,45 @@ export function RunTracePanel({ run, steps, metrics, onOpenDebug }: Props) {
               </div>
               {imageError ? <div className="trace-image-error">{imageError}</div> : null}
               <div className="trace-thought">{selected.thought || "没有思考摘要"}</div>
+              <div className="model-trace">
+                <div className="model-trace-head">
+                  <span>
+                    <BrainCircuit size={13} /> MODEL TRACE
+                  </span>
+                  {selectedModelTrace ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowModelResponse((current) => !current)}
+                    >
+                      {showModelResponse ? "收起响应" : "查看原始响应"}
+                    </button>
+                  ) : null}
+                </div>
+                {selectedModelTrace ? (
+                  <>
+                    <div className="model-trace-facts">
+                      <span>{selectedModelTrace.model}</span>
+                      <span>{selectedModelTrace.useVision ? "视觉" : "文本"}输入</span>
+                      <span>prompt {selectedModelTrace.promptChars} chars</span>
+                      <span>{selectedModelTrace.nodeCount} nodes</span>
+                      <span>{selectedModelTrace.attemptCount} attempts</span>
+                      <span>{formatMs(selectedModelTrace.durationMs)}</span>
+                    </div>
+                    {selectedModelTrace.usage ? (
+                      <code className="model-usage">
+                        usage {JSON.stringify(selectedModelTrace.usage)}
+                      </code>
+                    ) : null}
+                    {showModelResponse ? (
+                      <pre className="model-response">
+                        {selectedModelTrace.rawResponse}
+                      </pre>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="model-trace-empty">当前步骤没有模型轨迹</span>
+                )}
+              </div>
             </>
           ) : (
             <div className="trace-empty">选择一个步骤查看参数、结果和前后截图</div>

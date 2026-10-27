@@ -455,6 +455,23 @@ pub struct StepMetricRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ModelTraceRecord {
+    pub run_id: String,
+    pub step_index: u32,
+    pub model: String,
+    pub prompt_chars: usize,
+    pub system_chars: usize,
+    pub node_count: usize,
+    pub use_vision: bool,
+    pub attempt_count: u32,
+    pub raw_response: String,
+    pub usage: Value,
+    pub duration_ms: u64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentRunResult {
     pub run_id: String,
     pub status: String,

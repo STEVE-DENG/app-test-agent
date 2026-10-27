@@ -6,6 +6,7 @@ import type {
   DebugSnapshot,
   DeviceInfo,
   EfficiencyStats,
+  ModelTraceRecord,
   Observation,
   RunRecord,
   SaveSettingsInput,
@@ -59,6 +60,8 @@ const tauriApi = {
     invoke<ToolRecord[]>("list_run_steps", { runId }),
   listStepMetrics: (runId: string) =>
     invoke<StepMetricRecord[]>("list_step_metrics", { runId }),
+  listModelTraces: (runId: string) =>
+    invoke<ModelTraceRecord[]>("list_model_traces", { runId }),
   listSkills: () => invoke<SkillRecord[]>("list_skills"),
   setSkillStatus: (skillId: string, status: string) =>
     invoke<void>("set_skill_status", { skillId, status }),
@@ -130,6 +133,7 @@ const browserPreviewApi: typeof tauriApi = {
   listRuns: () => Promise.resolve([]),
   listRunSteps: () => Promise.resolve([]),
   listStepMetrics: () => Promise.resolve([]),
+  listModelTraces: () => Promise.resolve([]),
   listSkills: () => Promise.resolve([]),
   setSkillStatus: () => previewOnly("审核 Skill"),
   listAppPlugins: () => Promise.resolve([]),

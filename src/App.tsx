@@ -26,6 +26,7 @@ import type {
   DeviceInfo,
   EfficiencyStats,
   LearningLoopReport,
+  ModelTraceRecord,
   Observation,
   RunRecord,
   SaveSettingsInput,
@@ -70,6 +71,7 @@ function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runSteps, setRunSteps] = useState<ToolRecord[]>([]);
   const [runMetrics, setRunMetrics] = useState<StepMetricRecord[]>([]);
+  const [runModelTraces, setRunModelTraces] = useState<ModelTraceRecord[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
   const [loadingObservation, setLoadingObservation] = useState(false);
   const [stageError, setStageError] = useState("");
@@ -480,12 +482,14 @@ function App() {
   const handleSelectRun = async (id: string) => {
     setSelectedRunId(id);
     try {
-      const [steps, metrics] = await Promise.all([
+      const [steps, metrics, modelTraces] = await Promise.all([
         api.listRunSteps(id),
         api.listStepMetrics(id),
+        api.listModelTraces(id),
       ]);
       setRunSteps(steps);
       setRunMetrics(metrics);
+      setRunModelTraces(modelTraces);
     } catch (error) {
       setNotice({ tone: "error", message: errorMessage(error) });
     }
@@ -878,6 +882,7 @@ function App() {
         runs={runs}
         runSteps={runSteps}
         runMetrics={runMetrics}
+        runModelTraces={runModelTraces}
         selectedRunId={selectedRunId}
         observation={observation}
         selectedNode={selectedNode}
@@ -897,6 +902,10 @@ function App() {
         onSelectNode={setSelectedNode}
         onSelectRun={(id) => void handleSelectRun(id)}
         onOpenDebug={() => setActiveTab("debug")}
+        onOpenPage={(pageId) => {
+          setSelectedPageId(pageId);
+          setActiveTab("knowledge");
+        }}
         onSkillStatus={(id, status) => void handleSkillStatus(id, status)}
         onSelectPackage={(packageName) => void handleSelectPackage(packageName)}
         onSelectPage={setSelectedPageId}
