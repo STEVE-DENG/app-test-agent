@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::models::{
     ActionTrace, AppKnowledgePlugin, AppPluginSummary, AppTestCase, KnowledgeElement,
-    KnowledgePage, Observation, PageTransition, TestCaseStep, UiNode,
+    KnowledgePage, Observation, PageTransition, TestCaseStep, TestFailureAnalysis, UiNode,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -329,6 +329,10 @@ impl KnowledgeStore {
                 last_result: existing
                     .map(|index| plugin.test_cases[index].last_result.clone())
                     .unwrap_or_default(),
+                last_run_id: existing
+                    .and_then(|index| plugin.test_cases[index].last_run_id.clone()),
+                last_analysis: existing
+                    .and_then(|index| plugin.test_cases[index].last_analysis.clone()),
                 created_at,
                 updated_at: now.clone(),
             };
@@ -361,6 +365,8 @@ impl KnowledgeStore {
         test_id: &str,
         status: &str,
         result: &str,
+        run_id: Option<&str>,
+        analysis: Option<&TestFailureAnalysis>,
     ) -> Result<(), String> {
         let _guard = self.lock()?;
         let mut plugin = self.load_or_create(package)?;
@@ -371,6 +377,8 @@ impl KnowledgeStore {
             .ok_or_else(|| format!("找不到测试用例 {test_id}"))?;
         test_case.status = status.to_string();
         test_case.last_result = result.chars().take(2_000).collect();
+        test_case.last_run_id = run_id.map(str::to_string);
+        test_case.last_analysis = analysis.cloned();
         test_case.updated_at = Utc::now().to_rfc3339();
         plugin.updated_at = Utc::now().to_rfc3339();
         self.save(&plugin)
@@ -475,7 +483,7 @@ fn upsert_page(plugin: &mut AppKnowledgePlugin, observation: &Observation) -> Kn
         page.ui_path = observation.ui_path.clone();
         page.width = observation.width;
         page.height = observation.height;
-        if is_weak_page_name(&page.name) && !is_weak_page_name(&inferred_name) {
+        if should_replace_page_name(&page.name, &inferred_name) {
             page.name = inferred_name;
         }
         let mut merged = page
@@ -808,16 +816,9 @@ fn selected_tab_label(observation: &Observation) -> Option<String> {
 }
 
 fn page_context(observation: &Observation, selected_tab: Option<&str>) -> String {
-    let has_profile_markers = observation.nodes.iter().any(|node| {
-        let value = format!("{} {}", node.text, node.content_description);
-        value.contains("粉丝") && value.contains("关注")
-    });
-    if has_profile_markers {
-        return selected_tab
-            .map(|tab| format!("用户主页 · {tab}"))
-            .unwrap_or_else(|| "用户主页".to_string());
-    }
-
+    // Bottom tabs are stronger context than seller-card text on a feed page.
+    // "粉丝/关注" can also appear in product cards and must not turn the home
+    // feed into a user profile.
     if observation.activity.ends_with("MainActivity") {
         let bottom_tab = observation
             .nodes
@@ -840,6 +841,19 @@ fn page_context(observation: &Observation, selected_tab: Option<&str>) -> String
         }
     }
 
+    let has_profile_markers = observation.nodes.iter().any(|node| {
+        let value = format!("{} {}", node.text, node.content_description);
+        value.contains("编辑资料")
+            || value.contains("闲鱼号")
+            || (value.contains("我发布的") && value.contains("我卖出的"))
+            || (value.contains("获赞") && value.contains("粉丝") && value.contains("关注"))
+    });
+    if has_profile_markers {
+        return selected_tab
+            .map(|tab| format!("用户主页 · {tab}"))
+            .unwrap_or_else(|| "用户主页".to_string());
+    }
+
     selected_tab.map(|tab| tab.to_string()).unwrap_or_default()
 }
 
@@ -848,6 +862,15 @@ fn is_weak_page_name(name: &str) -> bool {
         || name == "页面"
         || name.ends_with("· MainActivity")
         || name.ends_with("· Unknown")
+}
+
+fn should_replace_page_name(existing: &str, inferred: &str) -> bool {
+    if is_weak_page_name(inferred) {
+        return false;
+    }
+    is_weak_page_name(existing)
+        || (existing.starts_with("用户主页")
+            && matches!(inferred, "首页" | "同城" | "消息" | "我的"))
 }
 
 fn package_display_name(package: &str) -> String {
@@ -1022,7 +1045,7 @@ fn merge_knowledge_page(target: &mut KnowledgePage, incoming: &KnowledgePage) {
         target.width = incoming.width;
         target.height = incoming.height;
     }
-    if is_weak_page_name(&target.name) && !is_weak_page_name(&incoming.name) {
+    if should_replace_page_name(&target.name, &incoming.name) {
         target.name = incoming.name.clone();
     }
 
@@ -1322,5 +1345,55 @@ mod tests {
         let mut right = page("page-b", "动态商品 B");
         right.elements[0].text = "另一个标题".to_string();
         assert!(pages_are_similar(&left, &right));
+    }
+
+    #[test]
+    fn seller_card_metrics_do_not_override_main_tab_context() {
+        let mut obs = observation("home-page-00001", "");
+        obs.nodes = vec![
+            UiNode {
+                index: 0,
+                text: String::new(),
+                content_description: "闲鱼，选中状态".to_string(),
+                resource_id: String::new(),
+                class_name: "android.widget.TextView".to_string(),
+                package: "com.example".to_string(),
+                bounds: Bounds {
+                    left: 22,
+                    top: 2218,
+                    right: 218,
+                    bottom: 2260,
+                },
+                clickable: true,
+                enabled: true,
+                focusable: true,
+                scrollable: false,
+                selected: false,
+                visible: true,
+                depth: 2,
+            },
+            UiNode {
+                index: 1,
+                text: String::new(),
+                content_description: "卖家A\n280粉丝\n卖出1212笔\n关注\n商品标题".to_string(),
+                resource_id: String::new(),
+                class_name: "android.view.View".to_string(),
+                package: "com.example".to_string(),
+                bounds: Bounds {
+                    left: 20,
+                    top: 600,
+                    right: 500,
+                    bottom: 1200,
+                },
+                clickable: true,
+                enabled: true,
+                focusable: true,
+                scrollable: false,
+                selected: false,
+                visible: true,
+                depth: 3,
+            },
+        ];
+        assert_eq!(infer_page_name(&obs), "首页");
     }
 }

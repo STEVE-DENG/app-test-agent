@@ -3,6 +3,7 @@ import {
   Camera,
   CircleStop,
   Combine,
+  Copy,
   FileJson,
   GitBranch,
   Layers3,
@@ -19,9 +20,11 @@ import type {
   ActionTrace,
   AppKnowledgePlugin,
   AppPluginSummary,
+  AppTestCase,
   KnowledgeElement,
   KnowledgePage,
   PageTransition,
+  TestFailureAnalysis,
 } from "../types";
 
 type Props = {
@@ -150,6 +153,18 @@ function testStatus(status: string) {
   if (status === "failed") return "失败";
   if (status === "running") return "执行中";
   return "已生成";
+}
+
+const failureLabels: Record<string, string> = {
+  "dynamic-content": "动态内容漂移",
+  "element-not-found": "控件未找到",
+  "wrong-page": "页面不匹配",
+  "real-regression": "疑似真实回归",
+  unknown: "未知失败",
+};
+
+function failureLabel(category: string) {
+  return failureLabels[category] || category;
 }
 
 type ElementCoverage = {
@@ -343,6 +358,10 @@ export function KnowledgePanel({
   const [screenshotError, setScreenshotError] = useState("");
   const [selectedElement, setSelectedElement] =
     useState<KnowledgeElement | null>(null);
+  const [testStatusFilter, setTestStatusFilter] = useState("all");
+  const [failureFilter, setFailureFilter] = useState("all");
+  const [testSearch, setTestSearch] = useState("");
+  const [copiedTestId, setCopiedTestId] = useState("");
   const fileInput = useRef<HTMLInputElement | null>(null);
   const layout = useMemo(() => graphLayout(plugin), [plugin]);
   const selectedPage =
@@ -355,6 +374,24 @@ export function KnowledgePanel({
     ) || [];
   const tests = plugin?.testCases || [];
   const coverage = useMemo(() => buildPluginCoverage(plugin), [plugin]);
+  const filteredTests = useMemo(() => {
+    const query = testSearch.trim().toLowerCase();
+    return tests.filter((testCase) => {
+      if (testStatusFilter !== "all" && testCase.status !== testStatusFilter) {
+        return false;
+      }
+      if (
+        failureFilter !== "all" &&
+        testCase.lastAnalysis?.category !== failureFilter
+      ) {
+        return false;
+      }
+      if (!query) return true;
+      return `${testCase.name} ${testCase.lastResult}`
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [failureFilter, testSearch, testStatusFilter, tests]);
   const selectedCoverage = selectedPage
     ? coverage.pages.get(selectedPage.id) || null
     : null;
@@ -385,6 +422,29 @@ export function KnowledgePanel({
       disposed = true;
     };
   }, [selectedPage?.screenshotPath]);
+
+  const copyFailureAnalysis = async (testCase: AppTestCase) => {
+    if (!testCase.lastAnalysis) return;
+    try {
+      await navigator.clipboard.writeText(
+        JSON.stringify(
+          {
+            testId: testCase.id,
+            name: testCase.name,
+            runId: testCase.lastRunId,
+            result: testCase.lastResult,
+            analysis: testCase.lastAnalysis,
+          },
+          null,
+          2,
+        ),
+      );
+      setCopiedTestId(testCase.id);
+      window.setTimeout(() => setCopiedTestId(""), 1500);
+    } catch {
+      setCopiedTestId("");
+    }
+  };
 
   const overlayElements = selectedPage
     ? selectedPage.elements
@@ -773,16 +833,53 @@ export function KnowledgePanel({
                 <span className="eyebrow">GENERATED JOURNEYS</span>
                 <strong>页面导航用例</strong>
               </div>
-              <span>{tests.length}</span>
+              <span>
+                {filteredTests.length}/{tests.length}
+              </span>
+            </div>
+            <div className="test-filters">
+              <input
+                value={testSearch}
+                onChange={(event) => setTestSearch(event.target.value)}
+                placeholder="搜索用例"
+                aria-label="搜索测试用例"
+              />
+              <select
+                value={testStatusFilter}
+                onChange={(event) => setTestStatusFilter(event.target.value)}
+                aria-label="按用例状态筛选"
+              >
+                <option value="all">全部状态</option>
+                <option value="failed">失败</option>
+                <option value="verified">已验证</option>
+                <option value="generated">已生成</option>
+                <option value="running">执行中</option>
+              </select>
+              <select
+                value={failureFilter}
+                onChange={(event) => setFailureFilter(event.target.value)}
+                aria-label="按失败分类筛选"
+              >
+                <option value="all">全部分类</option>
+                <option value="dynamic-content">动态内容漂移</option>
+                <option value="element-not-found">控件未找到</option>
+                <option value="wrong-page">页面不匹配</option>
+                <option value="real-regression">疑似真实回归</option>
+                <option value="unknown">未知失败</option>
+              </select>
             </div>
             <div className="generated-test-list">
-              {tests.length === 0 ? (
+              {filteredTests.length === 0 ? (
                 <div className="knowledge-empty inline">
                   <Route size={22} />
-                  <span>积累跳转关系后，可自动生成从首页到各页面的测试路径。</span>
+                  <span>
+                    {tests.length === 0
+                      ? "积累跳转关系后，可自动生成从首页到各页面的测试路径。"
+                      : "当前筛选条件下没有用例。"}
+                  </span>
                 </div>
               ) : (
-                tests.map((testCase) => (
+                filteredTests.map((testCase) => (
                   <article
                     key={testCase.id}
                     className="generated-test"
@@ -815,6 +912,13 @@ export function KnowledgePanel({
                     {testCase.lastResult ? (
                       <small className="test-result">{testCase.lastResult}</small>
                     ) : null}
+                    {testCase.lastAnalysis ? (
+                      <TestFailureCard
+                        analysis={testCase.lastAnalysis}
+                        copied={copiedTestId === testCase.id}
+                        onCopy={() => void copyFailureAnalysis(testCase)}
+                      />
+                    ) : null}
                   </article>
                 ))
               )}
@@ -828,6 +932,96 @@ export function KnowledgePanel({
         </div>
       )}
     </div>
+  );
+}
+
+function TestFailureCard({
+  analysis,
+  copied,
+  onCopy,
+}: {
+  analysis: TestFailureAnalysis;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  const locator = analysis.evidence.locator;
+  return (
+    <div className="test-failure-card">
+      <div className="test-failure-head">
+        <span className={`failure-kind ${analysis.category}`}>
+          {failureLabel(analysis.category)}
+        </span>
+        <small>
+          {Math.round(analysis.confidence * 100)}% · 第 {analysis.failedStep} 步 ·{" "}
+          {analysis.repetitions} 次
+        </small>
+      </div>
+      <p>{analysis.summary}</p>
+      <div className="failure-evidence">
+        <EvidenceThumb path={analysis.evidence.beforeScreenshot} label="before" />
+        <EvidenceThumb path={analysis.evidence.afterScreenshot} label="after" />
+      </div>
+      <div className="failure-locator">
+        <code>{locator?.strategy || "no-locator"}</code>
+        <span>
+          {locator?.requested || analysis.evidence.label} ·{" "}
+          {locator?.candidateCount || 0} candidates ·{" "}
+          {analysis.retryable ? "可重试" : "需人工复核"}
+        </span>
+      </div>
+      <details>
+        <summary>查看失败证据与建议</summary>
+        <ul>
+          {analysis.suggestions.map((suggestion) => (
+            <li key={suggestion}>{suggestion}</li>
+          ))}
+        </ul>
+        <code>{analysis.evidence.beforePageSignature.slice(0, 16)}</code>
+        <span> → </span>
+        <code>{analysis.evidence.afterPageSignature.slice(0, 16)}</code>
+        <small>{locator?.attemptedStrategies.join(" → ") || "无定位尝试"}</small>
+      </details>
+      <button type="button" className="copy-failure" onClick={onCopy}>
+        <Copy size={9} />
+        {copied ? "已复制分析" : "复制失败分析"}
+      </button>
+    </div>
+  );
+}
+
+function EvidenceThumb({ path, label }: { path: string; label: string }) {
+  const [dataUrl, setDataUrl] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!path) {
+      setDataUrl("");
+      setError("无截图");
+      return;
+    }
+    let disposed = false;
+    api
+      .readArtifact(path)
+      .then((nextDataUrl) => {
+        if (!disposed) {
+          setDataUrl(nextDataUrl);
+          setError("");
+        }
+      })
+      .catch((nextError) => {
+        if (!disposed) {
+          setDataUrl("");
+          setError(errorMessage(nextError));
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [path]);
+  return (
+    <figure className="failure-thumb" title={path || error}>
+      {dataUrl ? <img src={dataUrl} alt={label} /> : <span>{error || "加载中"}</span>}
+      <figcaption>{label}</figcaption>
+    </figure>
   );
 }
 

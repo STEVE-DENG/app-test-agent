@@ -161,6 +161,49 @@ export type TestCaseStep = {
   args: Record<string, unknown>;
 };
 
+export type ReplayLocatorEvidence = {
+  strategy: string;
+  requested: string;
+  matchedLabel: string;
+  elementKey?: string | null;
+  resourceId?: string | null;
+  bounds?: Bounds | null;
+  candidateCount: number;
+  confidence: number;
+  attemptedStrategies: string[];
+};
+
+export type ReplayStepEvidence = {
+  stepIndex: number;
+  label: string;
+  action: string;
+  fromPageId: string;
+  expectedPageId: string;
+  actualPageId: string;
+  beforeScreenshot: string;
+  afterScreenshot: string;
+  beforeUiPath: string;
+  afterUiPath: string;
+  beforePageSignature: string;
+  afterPageSignature: string;
+  locator?: ReplayLocatorEvidence | null;
+  result: Record<string, unknown>;
+  error?: string | null;
+  success: boolean;
+};
+
+export type TestFailureAnalysis = {
+  category: string;
+  confidence: number;
+  summary: string;
+  failedStep: number;
+  repetitions: number;
+  retryable: boolean;
+  suggestions: string[];
+  evidence: ReplayStepEvidence;
+  createdAt: string;
+};
+
 export type AppTestCase = {
   id: string;
   name: string;
@@ -170,6 +213,8 @@ export type AppTestCase = {
   steps: TestCaseStep[];
   status: string;
   lastResult: string;
+  lastRunId?: string | null;
+  lastAnalysis?: TestFailureAnalysis | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -314,12 +359,40 @@ export type RunRecord = {
   id: string;
   instruction: string;
   deviceSerial: string;
+  conversationId?: string | null;
   status: string;
   summary: string;
   model: string;
   startedAt: string;
   finishedAt: string | null;
   steps: number;
+};
+
+export type ConversationSummary = {
+  id: string;
+  title: string;
+  package: string;
+  deviceSerial: string;
+  messageCount: number;
+  lastMessage: string;
+  lastRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ConversationMessage = {
+  id: string;
+  conversationId: string;
+  runId: string | null;
+  role: "user" | "assistant" | "event" | string;
+  content: string;
+  status: string | null;
+  createdAt: string;
+};
+
+export type StartTaskResponse = {
+  conversationId: string;
+  runId: string;
 };
 
 export type SkillPlanStep = {

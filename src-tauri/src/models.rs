@@ -230,6 +230,62 @@ pub struct TestCaseStep {
     pub args: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayLocatorEvidence {
+    pub strategy: String,
+    pub requested: String,
+    pub matched_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<Bounds>,
+    pub candidate_count: usize,
+    pub confidence: f64,
+    #[serde(default)]
+    pub attempted_strategies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayStepEvidence {
+    pub step_index: u32,
+    pub label: String,
+    pub action: String,
+    pub from_page_id: String,
+    pub expected_page_id: String,
+    pub actual_page_id: String,
+    pub before_screenshot: String,
+    pub after_screenshot: String,
+    pub before_ui_path: String,
+    pub after_ui_path: String,
+    pub before_page_signature: String,
+    pub after_page_signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<ReplayLocatorEvidence>,
+    #[serde(default)]
+    pub result: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TestFailureAnalysis {
+    pub category: String,
+    pub confidence: f64,
+    pub summary: String,
+    pub failed_step: u32,
+    pub repetitions: u32,
+    pub retryable: bool,
+    pub suggestions: Vec<String>,
+    pub evidence: ReplayStepEvidence,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppTestCase {
@@ -241,6 +297,10 @@ pub struct AppTestCase {
     pub steps: Vec<TestCaseStep>,
     pub status: String,
     pub last_result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_analysis: Option<TestFailureAnalysis>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -412,12 +472,15 @@ pub struct StartExplorationInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestCaseRunResult {
+    pub run_id: String,
     pub test_id: String,
     pub package: String,
     pub status: String,
     pub passed_steps: u32,
     pub total_steps: u32,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TestFailureAnalysis>,
     pub finished_at: String,
 }
 
@@ -559,6 +622,8 @@ pub struct ModelTraceRecord {
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunResult {
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     pub status: String,
     pub summary: String,
     pub steps: u32,
@@ -567,10 +632,45 @@ pub struct AgentRunResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationSummary {
+    pub id: String,
+    pub title: String,
+    pub package: String,
+    pub device_serial: String,
+    pub message_count: u32,
+    pub last_message: String,
+    pub last_run_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessage {
+    pub id: String,
+    pub conversation_id: String,
+    pub run_id: Option<String>,
+    pub role: String,
+    pub content: String,
+    pub status: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTaskResponse {
+    pub conversation_id: String,
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunRecord {
     pub id: String,
     pub instruction: String,
     pub device_serial: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     pub status: String,
     pub summary: String,
     pub model: String,
@@ -621,6 +721,8 @@ pub struct StartTaskInput {
     pub instruction: String,
     pub device_serial: String,
     pub allow_high_risk: bool,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

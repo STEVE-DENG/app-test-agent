@@ -102,7 +102,7 @@ export function SettingsDialog({
             <SlidersHorizontal size={17} />
             <span>
               Agent 会同时发送压缩后的 UI 树与截图。支持任意 OpenAI-compatible
-              多模态 Chat Completions 服务。
+              多模态 Chat Completions 服务，包括 DeepSeek V4.1 视觉端点。
             </span>
           </div>
 
@@ -126,7 +126,7 @@ export function SettingsDialog({
               type="text"
               value={model}
               onChange={(event) => setModel(event.target.value)}
-              placeholder="gpt-4.1 / gui-owl / ui-tars"
+              placeholder="opencode-go/deepseek-v4.1-flash"
               autoCapitalize="off"
               autoCorrect="off"
               spellCheck={false}
@@ -195,7 +195,9 @@ export function SettingsDialog({
           <label className="switch-row">
             <span>
               <strong>多模态视觉输入</strong>
-              <small>关闭后只使用 UI 树、前台页面和文本上下文。</small>
+              <small>
+                多模态模型建议保持开启；关闭后只使用 UI 树、OCR 和文本上下文。
+              </small>
             </span>
             <input
               type="checkbox"

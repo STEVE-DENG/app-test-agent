@@ -4,6 +4,8 @@
 
 核心能力：
 
+- Codex 式持续对话流：同一会话可连续追加指令，刷新或重启后从 SQLite 恢复上下文。
+- 会话上下文自动带入模型，支持“继续”“刚才那个页面”等指代。
 - ADB 设备发现、截图和 accessibility/UI 树采集。
 - 截图 + UI 树 + 模型视觉 + Apple Vision OCR 混合感知。
 - OCR 文本与控件节点关联；UI 树定位失败时自动使用 OCR 坐标兜底。
@@ -82,5 +84,21 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin agent-compact -- \
 - Base URL，例如 `https://api.example.com/v1`
 - API Key
 - Model
+
+默认配置面向 `opencode-go/deepseek-v4.1-flash`，按多模态视觉模型使用。
+
+## 连续会话 CLI
+
+```bash
+# 第一轮会创建会话，并在输出的 conversationId 字段返回会话 ID
+cargo run --manifest-path src-tauri/Cargo.toml --bin agent-task -- \
+  "$HOME/Library/Application Support/com.nekoya.ai-apptest-agent" \
+  <device-serial> -- "返回闲鱼首页"
+
+# 后续轮次复用同一 conversation ID
+cargo run --manifest-path src-tauri/Cargo.toml --bin agent-task -- \
+  "$HOME/Library/Application Support/com.nekoya.ai-apptest-agent" \
+  <device-serial> <conversation-id> -- "现在页面上有哪些可操作控件？"
+```
 
 首版 API Key 保存在应用数据目录的受限权限设置文件中。迁移到 macOS Keychain 列在后续安全项。

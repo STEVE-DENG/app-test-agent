@@ -10,8 +10,8 @@ use tauri::{AppHandle, Emitter};
 use crate::device;
 use crate::knowledge::KnowledgeStore;
 use crate::models::{
-    AgentEvent, AgentRunResult, ModelDecision, ModelTraceRecord, Observation, RawModelDecision,
-    SkillHint, StoredSettings, ToolRecord, UiNode,
+    AgentEvent, AgentRunResult, ConversationMessage, ModelDecision, ModelTraceRecord, Observation,
+    RawModelDecision, SkillHint, StoredSettings, ToolRecord, UiNode,
 };
 use crate::storage::AppStore;
 
@@ -71,6 +71,7 @@ pub async fn run_agent(
     instruction: String,
     device_serial: String,
     allow_high_risk: bool,
+    conversation_id: Option<String>,
 ) -> Result<AgentRunResult, String> {
     let instruction = instruction.trim().to_string();
     if instruction.is_empty() {
@@ -89,10 +90,49 @@ pub async fn run_agent(
         );
     }
 
-    device::ensure_device_ready(&device_serial).await?;
+    let conversation = deps.store.ensure_conversation(
+        conversation_id.as_deref(),
+        &instruction,
+        "",
+        &device_serial,
+    )?;
+    let conversation_id = conversation.id;
+    let conversation_context = deps.store.get_conversation_messages(&conversation_id)?;
+    let context_for_model = conversation_context
+        .iter()
+        .rev()
+        .take(11)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    deps.store.append_conversation_message(
+        &conversation_id,
+        Some(&run_id),
+        "user",
+        &instruction,
+        Some("sent"),
+    )?;
 
-    deps.store
-        .begin_run(&run_id, &instruction, &device_serial, &deps.settings.model)?;
+    if let Err(error) = device::ensure_device_ready(&device_serial).await {
+        let _ = deps.store.append_conversation_message(
+            &conversation_id,
+            Some(&run_id),
+            "assistant",
+            &format!("设备连接失败：{error}"),
+            Some("failed"),
+        );
+        return Err(error);
+    }
+
+    deps.store.begin_run(
+        &run_id,
+        &instruction,
+        &device_serial,
+        &deps.settings.model,
+        Some(&conversation_id),
+    )?;
     emit(
         deps.app.as_ref(),
         &run_id,
@@ -100,13 +140,56 @@ pub async fn run_agent(
         "开始执行",
         &instruction,
         0,
-        None,
+        Some(json!({ "conversationId": conversation_id })),
     );
 
-    match execute_run(&deps, &run_id, &instruction, &device_serial).await {
-        Ok(result) => Ok(result),
+    match execute_run(
+        &deps,
+        &run_id,
+        &instruction,
+        &device_serial,
+        &conversation_id,
+        &context_for_model,
+    )
+    .await
+    {
+        Ok(result) => {
+            deps.store.append_conversation_message(
+                &conversation_id,
+                Some(&run_id),
+                "assistant",
+                &result.summary,
+                Some(&result.status),
+            )?;
+            emit(
+                deps.app.as_ref(),
+                &run_id,
+                "conversation_updated",
+                "会话已更新",
+                &result.summary,
+                0,
+                Some(json!({ "conversationId": conversation_id })),
+            );
+            Ok(result)
+        }
         Err(error) => {
             let _ = deps.store.finish_run(&run_id, "failed", &error, 0, None);
+            let _ = deps.store.append_conversation_message(
+                &conversation_id,
+                Some(&run_id),
+                "assistant",
+                &format!("执行失败：{error}"),
+                Some("failed"),
+            );
+            emit(
+                deps.app.as_ref(),
+                &run_id,
+                "conversation_updated",
+                "会话已更新",
+                &error,
+                0,
+                Some(json!({ "conversationId": conversation_id })),
+            );
             emit(
                 deps.app.as_ref(),
                 &run_id,
@@ -203,6 +286,8 @@ async fn execute_run(
     run_id: &str,
     instruction: &str,
     device_serial: &str,
+    conversation_id: &str,
+    conversation_context: &[ConversationMessage],
 ) -> Result<AgentRunResult, String> {
     let observation_started = Instant::now();
     let mut observation = device::capture_observation(
@@ -213,6 +298,12 @@ async fn execute_run(
     )
     .await?;
     let _initial_observation_ms = observation_started.elapsed().as_millis() as u64;
+    deps.store.ensure_conversation(
+        Some(conversation_id),
+        instruction,
+        &observation.package,
+        device_serial,
+    )?;
     if let Err(error) = deps.knowledge.register_observation_mut(&mut observation) {
         emit(
             deps.app.as_ref(),
@@ -401,6 +492,7 @@ async fn execute_run(
             );
             return Ok(AgentRunResult {
                 run_id: run_id.to_string(),
+                conversation_id: Some(conversation_id.to_string()),
                 status: "cancelled".to_string(),
                 summary: summary.to_string(),
                 steps: step_index - 1,
@@ -419,6 +511,7 @@ async fn execute_run(
             &history,
             &skills,
             last_error.as_deref(),
+            conversation_context,
         )
         .await
         {
@@ -570,6 +663,7 @@ async fn execute_run(
             );
             return Ok(AgentRunResult {
                 run_id: run_id.to_string(),
+                conversation_id: Some(conversation_id.to_string()),
                 status: status.to_string(),
                 summary,
                 steps: step_index,
@@ -627,6 +721,7 @@ async fn execute_run(
             );
             return Ok(AgentRunResult {
                 run_id: run_id.to_string(),
+                conversation_id: Some(conversation_id.to_string()),
                 status: "needs_input".to_string(),
                 summary: question.to_string(),
                 steps: step_index,
@@ -806,6 +901,7 @@ async fn execute_run(
     );
     Ok(AgentRunResult {
         run_id: run_id.to_string(),
+        conversation_id: Some(conversation_id.to_string()),
         status: "failed".to_string(),
         summary,
         steps: deps.settings.max_steps,
@@ -998,6 +1094,7 @@ async fn ask_model(
     history: &[String],
     skills: &[SkillHint],
     last_error: Option<&str>,
+    conversation_context: &[ConversationMessage],
 ) -> Result<ModelCallResult, String> {
     let started = Instant::now();
     let endpoint = chat_endpoint(&settings.base_url);
@@ -1011,6 +1108,7 @@ async fn ask_model(
         history,
         skills,
         last_error,
+        conversation_context,
     );
     let prompt_chars = user_prompt.chars().count();
     let node_count = compact_nodes(&observation.nodes, MODEL_NODE_LIMIT).len();
@@ -1115,7 +1213,7 @@ async fn ask_model(
 }
 
 fn system_prompt() -> &'static str {
-    r#"你是运行在 Android 设备上的 AI App 自动化 Agent。你必须同时利用 accessibility/UI 树和截图理解界面，并一次只执行一个可验证动作。
+    r#"你是运行在 Android 设备上的 AI App 自动化 Agent。你处在连续会话中，当前任务可能引用前文；你必须同时利用 accessibility/UI 树、截图和 OCR 理解界面，并一次只执行一个可验证动作。
 
 只输出一个严格 JSON 对象，不要 Markdown、代码块或额外解释：
 {
@@ -1149,7 +1247,8 @@ fn system_prompt() -> &'static str {
 - 不要执行与用户目标无关的发送、支付、删除、安装、权限修改等副作用动作。
 - 不要声称完成，除非当前观察中有明确证据；finish.summary 必须说明验证依据。
 - 不要单独调用 finish 与另一个工具；一次只能一个动作。
-- 相似历史 Skill 只作为已验证路线提示，不盲信旧坐标，必须根据当前页面校验。"#
+- 相似历史 Skill 只作为已验证路线提示，不盲信旧坐标，必须根据当前页面校验。
+- 最近会话上下文用于理解“继续、刚才、这个页面”等指代；当前屏幕和当前用户任务优先级最高。"#
 }
 
 fn user_prompt(
@@ -1161,6 +1260,7 @@ fn user_prompt(
     history: &[String],
     skills: &[SkillHint],
     last_error: Option<&str>,
+    conversation_context: &[ConversationMessage],
 ) -> String {
     let nodes = compact_nodes(&observation.nodes, MODEL_NODE_LIMIT);
     let ocr_summary = compact_ocr(observation, 12);
@@ -1198,14 +1298,16 @@ fn user_prompt(
             .collect::<Vec<_>>()
             .join("\n\n")
     };
+    let conversation_text = format_conversation_context(conversation_context);
 
     format!(
-        "用户任务：{instruction}\n设备：{device_serial}\n当前步骤：{step_index}/{max_steps}\n前台：{} / {}\n页面签名：{}\n视口：{}x{}\n\n可操作 UI 节点 JSON：\n{}\n\nOCR 视觉文本（按未匹配到 UI 节点的块优先；坐标可作 tap 兜底）：\n{}\n\n最近执行记录：\n{}\n\n相似已验证 Skill：\n{}\n\n上一次工具错误：\n{}\n\n请基于当前屏幕截图、UI 节点和 OCR 文本决定下一步。只返回一个 JSON 工具调用。",
+        "当前用户任务：{instruction}\n设备：{device_serial}\n当前步骤：{step_index}/{max_steps}\n前台：{} / {}\n页面签名：{}\n视口：{}x{}\n\n最近会话上下文（从旧到新）：\n{}\n\n可操作 UI 节点 JSON：\n{}\n\nOCR 视觉文本（按未匹配到 UI 节点的块优先；坐标可作 tap 兜底）：\n{}\n\n最近执行记录：\n{}\n\n相似已验证 Skill：\n{}\n\n上一次工具错误：\n{}\n\n请结合连续会话上下文、当前屏幕截图、UI 节点和 OCR 文本决定下一步。只返回一个 JSON 工具调用。",
         observation.package,
         observation.activity,
         &observation.page_signature[..observation.page_signature.len().min(16)],
         observation.width,
         observation.height,
+        conversation_text,
         serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()),
         ocr_summary,
         if recent_history.is_empty() {
@@ -1216,6 +1318,34 @@ fn user_prompt(
         skill_text,
         last_error.unwrap_or("无")
     )
+}
+
+fn format_conversation_context(messages: &[ConversationMessage]) -> String {
+    if messages.is_empty() {
+        return "无历史消息，这是当前会话的第一轮。".to_string();
+    }
+
+    let mut selected = Vec::new();
+    let mut char_budget = 4200_usize;
+    for message in messages.iter().rev().take(12) {
+        if !matches!(message.role.as_str(), "user" | "assistant") {
+            continue;
+        }
+        let role = if message.role == "user" {
+            "用户"
+        } else {
+            "Agent"
+        };
+        let content = truncate(message.content.trim(), 700);
+        let line_chars = role.chars().count() + content.chars().count() + 4;
+        if line_chars > char_budget && !selected.is_empty() {
+            break;
+        }
+        char_budget = char_budget.saturating_sub(line_chars);
+        selected.push(format!("{role}：{content}"));
+    }
+    selected.reverse();
+    selected.join("\n")
 }
 
 fn compact_ocr(observation: &Observation, limit: usize) -> String {
@@ -1525,6 +1655,35 @@ mod tests {
         assert_eq!(
             chat_endpoint("https://api.example.com/v1/"),
             "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn formats_recent_conversation_context_in_chronological_order() {
+        let messages = vec![
+            ConversationMessage {
+                id: "1".to_string(),
+                conversation_id: "conversation".to_string(),
+                run_id: Some("run-1".to_string()),
+                role: "user".to_string(),
+                content: "返回闲鱼首页".to_string(),
+                status: Some("sent".to_string()),
+                created_at: "2026-10-28T00:15:43Z".to_string(),
+            },
+            ConversationMessage {
+                id: "2".to_string(),
+                conversation_id: "conversation".to_string(),
+                run_id: Some("run-1".to_string()),
+                role: "assistant".to_string(),
+                content: "已返回首页".to_string(),
+                status: Some("completed".to_string()),
+                created_at: "2026-10-28T00:16:11Z".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_conversation_context(&messages),
+            "用户：返回闲鱼首页\nAgent：已返回首页"
         );
     }
 }

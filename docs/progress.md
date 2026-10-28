@@ -82,8 +82,35 @@
 - 新发现的路线包括“用户主页 → 相册”“用户主页 → 搜索激活页”“用户主页 → WebHybridActivity”；这些路线保留为候选，仍需后续回放验证。
 - 本轮使用 OCR + 模型压缩图运行自动探索；下一步优先处理 OCR 孤立块和深层 Flutter/Web 页面。
 
+### 2026-10-28 失败回放分类与长期 Loop 调试闭环
+
+- 用例回放新增结构化失败分析：`dynamic-content`、`element-not-found`、`wrong-page`、`real-regression`、`unknown`，并保存 failedStep、置信度、重复次数、是否可重试、定位策略、候选数量、前后截图、UI XML、页面 ID 和页面签名。
+- 同类页面不匹配连续出现 2 次才会升级为“疑似真实回归”；单次失败不会直接标记回归，也不会自动把失败用例改成 verified。
+- 真机回放 `com.taobao.idlefish:a9c7d7f3eaf02895` 得到 `element-not-found`，第 2 步找不到 `android.view.View 1005`，保存了 before/after 证据。
+- 真机回放 `com.taobao.idlefish:a6c3e97e57bcb8b3` 首次得到 `wrong-page`；重复后曾升级为 `real-regression`。进一步检查发现知识定位把旧广告控件按类名+位置误匹配到了“闲鱼回收”，已禁止带语义文本的控件使用位置兜底；复测改为真实的 `element-not-found`，避免点击错误控件制造假回归。
+- 修复 MainActivity 首页被卖家卡片“粉丝/关注”文本误命名为“用户主页”的问题；首页当前页面 canonical 名称恢复为“首页”，起始页校验可通过。
+- KnowledgePanel 新增用例搜索、状态筛选、失败分类筛选、失败置信度/重复次数、前后证据缩略图、定位策略/候选数量、失败建议和复制失败分析 JSON。
+- `agent-debug --summary` 新增知识摘要：测试状态、失败分类、failedStep、重复次数、是否可重试和最近 runId，便于长期 Loop 先取轻量事实。
+- 新增 `docs/long-run-state.json`，并重写 `docs/long-run-prompt.md`：TODO 能力完成与闲鱼知识积累分开定义；每批固定记录页面/跳转/覆盖/OCR/Prompt/模型/观察耗时；长 Loop 已同步更新。
+- 最新真机证据：`headless-test-20261027-233834` 为 `element-not-found`；`headless-test-20261027-235830` 验证旧广告控件不再被错误位置点击。
+- `npm run build`、`cargo check`、`cargo test`（22 项）通过。
+
+### 2026-10-28 Codex 式持续对话流
+
+- Agent 从一次性任务表单改为持续会话：新增 `conversations`、`conversation_messages` 表，`runs.conversation_id` 关联每轮执行。
+- `start_task` 返回 `conversationId + runId`；同一会话可连续追加指令，刷新窗口或重启应用后从 SQLite 恢复消息。
+- 每次模型决策会读取最近 11 条 user/assistant 消息和最近 12 条会话记录，并限制上下文长度；用户消息与 Agent 最终结果都写入会话。
+- 右栏重做为对话流：用户/Agent 气泡、执行中状态、可折叠的单轮事件轨迹、历史会话切换、新建会话、Enter 发送、Shift+Enter 换行。
+- 前端不再在每次任务开始时清空所有事件；消息与所属 run 关联，可回看该轮执行轨迹。
+- `deepseek-v4.1` 继续按多模态模型使用，保留截图 `image_url` 输入、OCR、UI 树混合感知。
+- 真机连续两轮验证：会话 `7bbb2266-884d-43a6-b5c1-dbd91a475f1a`，第一轮“返回闲鱼首页”完成；第二轮仅问“现在页面上有哪些可操作控件？”，模型 Prompt 已包含前一轮用户任务和 Agent 结论，第二轮正确识别闲鱼首页控件。
+- SQLite 验证该会话为 2 条 user + 2 条 assistant；`model_traces.prompt_text` 可直接复核上下文注入。
+- 新增 `agent-task` 的 conversation ID 参数，便于无头验证和后续长 Loop 复用会话。
+- `npm run build`、`cargo check`、`cargo test`（22 项）通过。
+
 ### 下一步
 
+- 完成真实 Tauri 窗口内连续对话的手动验证；当前已通过同一 SQLite/Agent 链路的真机双轮验证和窗口视觉检查。
+- 继续回放其余失败用例，补齐 `dynamic-content`、`wrong-page` 和 `unknown` 的真实样本。
 - 用 OCR 孤立块优先探索闲鱼搜索、商品详情和 Flutter/Web 深层页面。
-- 将失败用例分类为 `dynamic-content`、`element-not-found`、`wrong-page`、`real-regression` 和 `unknown`。
-- 为每轮 Loop 记录 OCR 孤立块、模型输入图大小、Prompt 字符数、模型耗时和观察耗时，连续两批无增量时停止并报告。
+- 将每批页面/跳转/用例/覆盖率/OCR 孤立块/Prompt 字符/模型图大小/模型与观察耗时写入 `docs/long-run-state.json`，连续两批无增量时暂停并报告。

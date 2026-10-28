@@ -22,6 +22,8 @@ import type {
   AgentEvent,
   AppKnowledgePlugin,
   AppPluginSummary,
+  ConversationMessage,
+  ConversationSummary,
   DebugSnapshot,
   DeviceInfo,
   EfficiencyStats,
@@ -57,6 +59,11 @@ function App() {
   const [knowledgeError, setKnowledgeError] = useState("");
   const [skills, setSkills] = useState<SkillRecord[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationMessages, setConversationMessages] = useState<
+    ConversationMessage[]
+  >([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState("idle");
@@ -107,6 +114,21 @@ function App() {
   const refreshRuns = useCallback(async () => {
     try {
       setRuns(await api.listRuns());
+    } catch (error) {
+      setNotice({ tone: "error", message: errorMessage(error) });
+    }
+  }, []);
+
+  const refreshConversations = useCallback(async (preferredId?: string) => {
+    try {
+      const next = await api.listConversations();
+      setConversations(next);
+      const targetId =
+        preferredId || next.find((item) => item.messageCount > 0)?.id || null;
+      if (targetId) {
+        setConversationId(targetId);
+        setConversationMessages(await api.getConversationMessages(targetId));
+      }
     } catch (error) {
       setNotice({ tone: "error", message: errorMessage(error) });
     }
@@ -179,6 +201,7 @@ function App() {
     void refreshDevices();
     void refreshSkills();
     void refreshRuns();
+    void refreshConversations();
     void refreshAppPlugins();
     void refreshEfficiency();
     api
@@ -187,6 +210,7 @@ function App() {
       .catch((error) => setNotice({ tone: "error", message: errorMessage(error) }));
   }, [
     refreshAppPlugins,
+    refreshConversations,
     refreshDevices,
     refreshEfficiency,
     refreshRuns,
@@ -211,6 +235,7 @@ function App() {
             action?: string;
             package?: string;
             pageId?: string;
+            conversationId?: string;
           }
         | null
         | undefined;
@@ -299,6 +324,30 @@ function App() {
         );
       }
       if (
+        [
+          "run_completed",
+          "run_failed",
+          "run_cancelled",
+          "needs_input",
+          "conversation_updated",
+        ].includes(event.eventType)
+      ) {
+        const eventConversationId = data?.conversationId;
+        const targetConversationId =
+          typeof eventConversationId === "string"
+            ? eventConversationId
+            : conversationId;
+        if (targetConversationId) {
+          void api
+            .getConversationMessages(targetConversationId)
+            .then(setConversationMessages)
+            .catch((error) =>
+              setNotice({ tone: "error", message: errorMessage(error) }),
+            );
+        }
+        void refreshConversations(targetConversationId || undefined);
+      }
+      if (
         ["run_completed", "run_failed", "run_cancelled", "needs_input"].includes(
           event.eventType,
         )
@@ -337,9 +386,11 @@ function App() {
     };
   }, [
     refreshAppPlugins,
+    refreshConversations,
     refreshEfficiency,
     refreshRuns,
     refreshSkills,
+    conversationId,
     selectedPackage,
   ]);
 
@@ -402,7 +453,6 @@ function App() {
     setTaskError("");
     setStageError("");
     setNotice(null);
-    setEvents([]);
     setRecalledSkills([]);
     setCurrentThought("");
     setCurrentAction("planning");
@@ -412,16 +462,74 @@ function App() {
     setActiveTab("timeline");
 
     try {
-      const nextRunId = await api.startTask({
+      const started = await api.startTask({
         instruction,
         deviceSerial: selectedDevice.serial,
         allowHighRisk,
+        conversationId,
       });
-      setRunId(nextRunId);
+      setRunId(started.runId);
+      setConversationId(started.conversationId);
+      setInstruction("");
+      setConversationMessages((current) => [
+        ...current,
+        {
+          id: `local-user-${Date.now()}`,
+          conversationId: started.conversationId,
+          runId: started.runId,
+          role: "user",
+          content: instruction,
+          status: "sent",
+          createdAt: new Date().toISOString(),
+        },
+      ]);
     } catch (error) {
       setRunning(false);
       setRunStatus("failed");
       setTaskError(errorMessage(error));
+    }
+  };
+
+  const handleNewConversation = () => {
+    setConversationId(null);
+    setConversationMessages([]);
+    setEvents([]);
+    setRunId(null);
+    setRunStatus("idle");
+    setCurrentThought("");
+    setCurrentAction("");
+    setCurrentStep(0);
+    setTaskError("");
+  };
+
+  const handleSelectConversation = async (id: string) => {
+    setConversationId(id);
+    setEvents([]);
+    setRunStatus("idle");
+    setCurrentAction("");
+    setCurrentThought("");
+    setTaskError("");
+    try {
+      setConversationMessages(await api.getConversationMessages(id));
+    } catch (error) {
+      setNotice({ tone: "error", message: errorMessage(error) });
+    }
+  };
+
+  const handleArchiveConversation = async () => {
+    if (!conversationId || running) return;
+    try {
+      await api.archiveConversation(conversationId);
+      setConversations((current) =>
+        current.filter((conversation) => conversation.id !== conversationId),
+      );
+      setConversationId(null);
+      setConversationMessages([]);
+      setEvents([]);
+      setRunStatus("idle");
+      setNotice({ tone: "success", message: "会话已归档" });
+    } catch (error) {
+      setNotice({ tone: "error", message: errorMessage(error) });
     }
   };
 
@@ -858,6 +966,9 @@ function App() {
         <AgentPanel
           settings={settings}
           selectedDevice={selectedDevice}
+          conversations={conversations}
+          conversationId={conversationId}
+          messages={conversationMessages}
           instruction={instruction}
           onInstructionChange={setInstruction}
           allowHighRisk={allowHighRisk}
@@ -873,6 +984,9 @@ function App() {
           error={taskError}
           onStart={() => void handleStart()}
           onCancel={() => void handleCancel()}
+          onNewConversation={handleNewConversation}
+          onSelectConversation={(id) => void handleSelectConversation(id)}
+          onArchiveConversation={() => void handleArchiveConversation()}
           onOpenSettings={() => {
             setSettingsError("");
             setSettingsTestResult("");

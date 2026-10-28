@@ -3,6 +3,8 @@ import type {
   AppKnowledgePlugin,
   AppPluginSummary,
   AppTestCase,
+  ConversationMessage,
+  ConversationSummary,
   DebugSnapshot,
   DeviceInfo,
   EfficiencyStats,
@@ -12,6 +14,7 @@ import type {
   SaveSettingsInput,
   SettingsView,
   SkillRecord,
+  StartTaskResponse,
   StepMetricRecord,
   ToolRecord,
 } from "../types";
@@ -54,10 +57,17 @@ const tauriApi = {
     instruction: string;
     deviceSerial: string;
     allowHighRisk: boolean;
-  }) => invoke<string>("start_task", { input }),
+    conversationId?: string | null;
+  }) => invoke<StartTaskResponse>("start_task", { input }),
   cancelTask: (runId: string) =>
     invoke<boolean>("cancel_task", { runId }),
   listRuns: (limit = 30) => invoke<RunRecord[]>("list_runs", { limit }),
+  listConversations: (limit = 30) =>
+    invoke<ConversationSummary[]>("list_conversations", { limit }),
+  getConversationMessages: (conversationId: string) =>
+    invoke<ConversationMessage[]>("get_conversation_messages", { conversationId }),
+  archiveConversation: (conversationId: string) =>
+    invoke<void>("archive_conversation", { conversationId }),
   listRunSteps: (runId: string) =>
     invoke<ToolRecord[]>("list_run_steps", { runId }),
   listStepMetrics: (runId: string) =>
@@ -136,6 +146,9 @@ const browserPreviewApi: typeof tauriApi = {
   startTask: () => previewOnly("执行真实任务"),
   cancelTask: () => Promise.resolve(false),
   listRuns: () => Promise.resolve([]),
+  listConversations: () => Promise.resolve([]),
+  getConversationMessages: () => Promise.resolve([]),
+  archiveConversation: () => previewOnly("归档会话"),
   listRunSteps: () => Promise.resolve([]),
   listStepMetrics: () => Promise.resolve([]),
   listModelTraces: () => Promise.resolve([]),

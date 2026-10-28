@@ -7,8 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::models::{
-    EfficiencyStats, ModelTraceRecord, RunRecord, SkillHint, SkillPlanStep, SkillRecord,
-    StepMetricRecord, ToolRecord,
+    ConversationMessage, ConversationSummary, EfficiencyStats, ModelTraceRecord, RunRecord,
+    SkillHint, SkillPlanStep, SkillRecord, StepMetricRecord, ToolRecord,
 };
 
 pub struct AppStore {
@@ -32,6 +32,7 @@ impl AppStore {
                     id TEXT PRIMARY KEY,
                     instruction TEXT NOT NULL,
                     device_serial TEXT NOT NULL,
+                    conversation_id TEXT,
                     status TEXT NOT NULL,
                     summary TEXT NOT NULL DEFAULT '',
                     model TEXT NOT NULL DEFAULT '',
@@ -57,6 +58,29 @@ impl AppStore {
 
                 CREATE INDEX IF NOT EXISTS idx_steps_run_id
                 ON steps(run_id, step_index);
+
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    package TEXT NOT NULL DEFAULT '',
+                    device_serial TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    archived_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    run_id TEXT,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_conversation_messages
+                ON conversation_messages(conversation_id, created_at);
 
                 CREATE TABLE IF NOT EXISTS skills (
                     id TEXT PRIMARY KEY,
@@ -118,6 +142,8 @@ impl AppStore {
             "ALTER TABLE steps ADD COLUMN page_id_after TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE model_traces ADD COLUMN prompt_text TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE model_traces ADD COLUMN endpoint TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE runs ADD COLUMN conversation_id TEXT",
+            "ALTER TABLE conversations ADD COLUMN archived_at TEXT",
         ] {
             let _ = connection.execute(migration, []);
         }
@@ -134,16 +160,19 @@ impl AppStore {
         instruction: &str,
         device_serial: &str,
         model: &str,
+        conversation_id: Option<&str>,
     ) -> Result<(), String> {
         let connection = self.lock()?;
         connection
             .execute(
-                "INSERT INTO runs (id, instruction, device_serial, status, summary, model, started_at)
-                 VALUES (?1, ?2, ?3, 'running', '', ?4, ?5)",
+                "INSERT INTO runs (
+                    id, instruction, device_serial, conversation_id, status, summary, model, started_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'running', '', ?5, ?6)",
                 params![
                     run_id,
                     instruction,
                     device_serial,
+                    conversation_id,
                     model,
                     Utc::now().to_rfc3339()
                 ],
@@ -252,7 +281,7 @@ impl AppStore {
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(
-                "SELECT id, instruction, device_serial, status, summary, model,
+                "SELECT id, instruction, device_serial, conversation_id, status, summary, model,
                         started_at, finished_at, steps
                  FROM runs
                  ORDER BY started_at DESC
@@ -265,12 +294,13 @@ impl AppStore {
                     id: row.get(0)?,
                     instruction: row.get(1)?,
                     device_serial: row.get(2)?,
-                    status: row.get(3)?,
-                    summary: row.get(4)?,
-                    model: row.get(5)?,
-                    started_at: row.get(6)?,
-                    finished_at: row.get(7)?,
-                    steps: row.get::<_, i64>(8)? as u32,
+                    conversation_id: row.get(3)?,
+                    status: row.get(4)?,
+                    summary: row.get(5)?,
+                    model: row.get(6)?,
+                    started_at: row.get(7)?,
+                    finished_at: row.get(8)?,
+                    steps: row.get::<_, i64>(9)? as u32,
                 })
             })
             .map_err(|error| format!("查询任务失败: {error}"))?;
@@ -316,6 +346,212 @@ impl AppStore {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("读取步骤失败: {error}"))
+    }
+
+    pub fn ensure_conversation(
+        &self,
+        conversation_id: Option<&str>,
+        title: &str,
+        package: &str,
+        device_serial: &str,
+    ) -> Result<ConversationSummary, String> {
+        let connection = self.lock()?;
+        let now = Utc::now().to_rfc3339();
+        let id = conversation_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let exists = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?1)",
+                params![id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| format!("检查会话失败: {error}"))?;
+
+        if exists {
+            connection
+                .execute(
+                    "UPDATE conversations
+                     SET title = CASE
+                           WHEN trim(title) = '' OR title = '新会话' THEN ?2
+                           ELSE title
+                         END,
+                         package = CASE WHEN ?3 <> '' THEN ?3 ELSE package END,
+                         device_serial = CASE
+                           WHEN ?4 <> '' THEN ?4
+                           ELSE device_serial
+                         END,
+                         updated_at = ?5
+                     WHERE id = ?1",
+                    params![
+                        id,
+                        truncate_chars(title.trim(), 42),
+                        package.trim(),
+                        device_serial.trim(),
+                        now
+                    ],
+                )
+                .map_err(|error| format!("更新会话失败: {error}"))?;
+        } else {
+            connection
+                .execute(
+                    "INSERT INTO conversations (
+                        id, title, package, device_serial, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                    params![
+                        id,
+                        truncate_chars(title.trim(), 42),
+                        package.trim(),
+                        device_serial.trim(),
+                        now
+                    ],
+                )
+                .map_err(|error| format!("创建会话失败: {error}"))?;
+        }
+
+        query_conversation(&connection, &id)
+    }
+
+    pub fn append_conversation_message(
+        &self,
+        conversation_id: &str,
+        run_id: Option<&str>,
+        role: &str,
+        content: &str,
+        status: Option<&str>,
+    ) -> Result<ConversationMessage, String> {
+        let connection = self.lock()?;
+        let id = Uuid::new_v4().to_string();
+        let created_at = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO conversation_messages (
+                    id, conversation_id, run_id, role, content, status, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    id,
+                    conversation_id,
+                    run_id,
+                    role,
+                    content,
+                    status,
+                    created_at
+                ],
+            )
+            .map_err(|error| format!("保存会话消息失败: {error}"))?;
+        connection
+            .execute(
+                "UPDATE conversations SET updated_at = ?2 WHERE id = ?1",
+                params![conversation_id, created_at],
+            )
+            .map_err(|error| format!("更新会话时间失败: {error}"))?;
+        Ok(ConversationMessage {
+            id,
+            conversation_id: conversation_id.to_string(),
+            run_id: run_id.map(ToString::to_string),
+            role: role.to_string(),
+            content: content.to_string(),
+            status: status.map(ToString::to_string),
+            created_at,
+        })
+    }
+
+    pub fn list_conversations(&self, limit: u32) -> Result<Vec<ConversationSummary>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    c.id,
+                    c.title,
+                    c.package,
+                    c.device_serial,
+                    (SELECT COUNT(*) FROM conversation_messages m
+                     WHERE m.conversation_id = c.id),
+                    COALESCE((
+                        SELECT m.content FROM conversation_messages m
+                        WHERE m.conversation_id = c.id
+                        ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
+                    ), ''),
+                    (
+                        SELECT m.run_id FROM conversation_messages m
+                        WHERE m.conversation_id = c.id AND m.run_id IS NOT NULL
+                        ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
+                    ),
+                    c.created_at,
+                    c.updated_at
+                 FROM conversations c
+                 WHERE c.archived_at IS NULL
+                 ORDER BY c.updated_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|error| format!("准备会话查询失败: {error}"))?;
+        let rows = statement
+            .query_map(params![limit.clamp(1, 100)], |row| {
+                Ok(ConversationSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    package: row.get(2)?,
+                    device_serial: row.get(3)?,
+                    message_count: row.get::<_, i64>(4)? as u32,
+                    last_message: row.get(5)?,
+                    last_run_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })
+            .map_err(|error| format!("查询会话失败: {error}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取会话失败: {error}"))
+    }
+
+    pub fn get_conversation_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationMessage>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, conversation_id, run_id, role, content, status, created_at
+                 FROM conversation_messages
+                 WHERE conversation_id = ?1
+                 ORDER BY created_at ASC, rowid ASC",
+            )
+            .map_err(|error| format!("准备会话消息查询失败: {error}"))?;
+        let rows = statement
+            .query_map(params![conversation_id], |row| {
+                Ok(ConversationMessage {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    role: row.get(3)?,
+                    content: row.get(4)?,
+                    status: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .map_err(|error| format!("查询会话消息失败: {error}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取会话消息失败: {error}"))
+    }
+
+    pub fn archive_conversation(&self, conversation_id: &str) -> Result<(), String> {
+        let connection = self.lock()?;
+        let updated = connection
+            .execute(
+                "UPDATE conversations
+                 SET archived_at = ?2, updated_at = ?2
+                 WHERE id = ?1 AND archived_at IS NULL",
+                params![conversation_id, Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| format!("归档会话失败: {error}"))?;
+        if updated == 0 {
+            return Err("会话不存在或已归档".to_string());
+        }
+        Ok(())
     }
 
     pub fn list_step_metrics(&self, run_id: &str) -> Result<Vec<StepMetricRecord>, String> {
@@ -781,6 +1017,51 @@ impl AppStore {
     }
 }
 
+fn query_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<ConversationSummary, String> {
+    connection
+        .query_row(
+            "SELECT
+                c.id,
+                c.title,
+                c.package,
+                c.device_serial,
+                (SELECT COUNT(*) FROM conversation_messages m
+                 WHERE m.conversation_id = c.id),
+                COALESCE((
+                    SELECT m.content FROM conversation_messages m
+                    WHERE m.conversation_id = c.id
+                    ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
+                ), ''),
+                (
+                    SELECT m.run_id FROM conversation_messages m
+                    WHERE m.conversation_id = c.id AND m.run_id IS NOT NULL
+                    ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
+                ),
+                c.created_at,
+                c.updated_at
+             FROM conversations c
+             WHERE c.id = ?1",
+            params![conversation_id],
+            |row| {
+                Ok(ConversationSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    package: row.get(2)?,
+                    device_serial: row.get(3)?,
+                    message_count: row.get::<_, i64>(4)? as u32,
+                    last_message: row.get(5)?,
+                    last_run_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            },
+        )
+        .map_err(|error| format!("读取会话失败: {error}"))
+}
+
 pub fn extract_keywords(text: &str) -> Vec<String> {
     let mut keywords = HashSet::new();
     let stopwords = [
@@ -896,7 +1177,7 @@ mod tests {
         let instruction = "在小红书搜索机械键盘并记录价格";
         let package = "com.xingin.xhs";
         store
-            .begin_run(run_id, instruction, "emulator-5554", "test-model")
+            .begin_run(run_id, instruction, "emulator-5554", "test-model", None)
             .expect("begin run");
         let records = vec![
             ToolRecord {
@@ -965,6 +1246,67 @@ mod tests {
             .expect("stored skill");
         assert_eq!(stored.reuse_count, 1);
         assert_eq!(stored.success_count, 1);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn persists_conversation_messages_and_reuses_conversation() {
+        let data_dir =
+            std::env::temp_dir().join(format!("ai-apptest-agent-conversation-{}", Uuid::new_v4()));
+        let store = AppStore::new(data_dir.clone()).expect("create store");
+        let conversation = store
+            .ensure_conversation(None, "返回闲鱼首页", "", "emulator-5554")
+            .expect("create conversation");
+        store
+            .append_conversation_message(&conversation.id, None, "user", "返回闲鱼首页", None)
+            .expect("save user message");
+        store
+            .append_conversation_message(
+                &conversation.id,
+                Some("run-2"),
+                "assistant",
+                "已返回首页",
+                Some("completed"),
+            )
+            .expect("save assistant message");
+
+        let same_conversation = store
+            .ensure_conversation(
+                Some(&conversation.id),
+                "现在页面上有哪些按钮",
+                "com.taobao.idlefish",
+                "emulator-5554",
+            )
+            .expect("reuse conversation");
+        assert_eq!(same_conversation.id, conversation.id);
+        assert_eq!(same_conversation.package, "com.taobao.idlefish");
+        assert_eq!(same_conversation.message_count, 2);
+
+        let messages = store
+            .get_conversation_messages(&conversation.id)
+            .expect("list messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].run_id.as_deref(), Some("run-2"));
+        assert_eq!(
+            store
+                .list_conversations(10)
+                .expect("list conversations")
+                .len(),
+            1
+        );
+
+        store
+            .archive_conversation(&conversation.id)
+            .expect("archive conversation");
+        assert!(
+            store
+                .list_conversations(10)
+                .expect("list active conversations")
+                .is_empty()
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(data_dir);

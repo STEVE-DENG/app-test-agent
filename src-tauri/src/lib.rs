@@ -17,10 +17,11 @@ use base64::Engine;
 use chrono::Utc;
 use knowledge::KnowledgeStore;
 use models::{
-    AgentRunResult, AppKnowledgePlugin, AppPluginSummary, AppTestCase, ArtifactInfo, DebugSnapshot,
-    DebugSnapshotInput, DeviceInfo, EfficiencyStats, LearningLoopInput, ModelTraceRecord,
-    Observation, RunRecord, SaveSettingsInput, SettingsView, SkillRecord, StartExplorationInput,
-    StartTaskInput, StepMetricRecord, StoredSettings, ToolRecord,
+    AgentRunResult, AppKnowledgePlugin, AppPluginSummary, AppTestCase, ArtifactInfo,
+    ConversationMessage, ConversationSummary, DebugSnapshot, DebugSnapshotInput, DeviceInfo,
+    EfficiencyStats, LearningLoopInput, ModelTraceRecord, Observation, RunRecord,
+    SaveSettingsInput, SettingsView, SkillRecord, StartExplorationInput, StartTaskInput,
+    StartTaskResponse, StepMetricRecord, StoredSettings, ToolRecord,
 };
 use storage::AppStore;
 use tauri::{Manager, State};
@@ -89,6 +90,7 @@ pub async fn run_headless_task(
     device_serial: String,
     instruction: String,
     allow_high_risk: bool,
+    conversation_id: Option<String>,
 ) -> Result<models::AgentRunResult, String> {
     let artifacts_dir = data_dir.join("artifacts");
     std::fs::create_dir_all(&artifacts_dir)
@@ -110,6 +112,7 @@ pub async fn run_headless_task(
         instruction,
         device_serial,
         allow_high_risk,
+        conversation_id,
     )
     .await
 }
@@ -292,7 +295,7 @@ async fn start_task(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     input: StartTaskInput,
-) -> Result<String, String> {
+) -> Result<StartTaskResponse, String> {
     let instruction = input.instruction.trim().to_string();
     if instruction.is_empty() {
         return Err("任务描述不能为空".to_string());
@@ -311,6 +314,13 @@ async fn start_task(
     device::ensure_device_ready(&input.device_serial).await?;
 
     let run_id = Uuid::new_v4().to_string();
+    let conversation = state.store.ensure_conversation(
+        input.conversation_id.as_deref(),
+        &instruction,
+        "",
+        &input.device_serial,
+    )?;
+    let conversation_id = conversation.id;
     let cancellation = Arc::new(AtomicBool::new(false));
     state
         .cancellations
@@ -329,6 +339,7 @@ async fn start_task(
     let cancellations = state.cancellations.clone();
     let background_run_id = run_id.clone();
     let cleanup_run_id = run_id.clone();
+    let background_conversation_id = conversation_id.clone();
     tauri::async_runtime::spawn(async move {
         let _: Result<AgentRunResult, String> = agent::run_agent(
             deps,
@@ -336,6 +347,7 @@ async fn start_task(
             instruction,
             input.device_serial,
             input.allow_high_risk,
+            Some(background_conversation_id),
         )
         .await;
         if let Ok(mut active) = cancellations.lock() {
@@ -343,7 +355,10 @@ async fn start_task(
         }
     });
 
-    Ok(run_id)
+    Ok(StartTaskResponse {
+        conversation_id,
+        run_id,
+    })
 }
 
 #[tauri::command]
@@ -363,6 +378,27 @@ fn cancel_task(state: State<'_, AppState>, run_id: String) -> Result<bool, Strin
 #[tauri::command]
 fn list_runs(state: State<'_, AppState>, limit: Option<u32>) -> Result<Vec<RunRecord>, String> {
     state.store.list_runs(limit.unwrap_or(30))
+}
+
+#[tauri::command]
+fn list_conversations(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<ConversationSummary>, String> {
+    state.store.list_conversations(limit.unwrap_or(30))
+}
+
+#[tauri::command]
+fn get_conversation_messages(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<Vec<ConversationMessage>, String> {
+    state.store.get_conversation_messages(&conversation_id)
+}
+
+#[tauri::command]
+fn archive_conversation(state: State<'_, AppState>, conversation_id: String) -> Result<(), String> {
+    state.store.archive_conversation(&conversation_id)
 }
 
 #[tauri::command]
@@ -825,6 +861,9 @@ pub fn run() {
             start_task,
             cancel_task,
             list_runs,
+            list_conversations,
+            get_conversation_messages,
+            archive_conversation,
             list_run_steps,
             list_step_metrics,
             list_model_traces,
